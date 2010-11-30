@@ -8,15 +8,8 @@
  *      Author: jongsoo
  */
 
-#ifndef QUEUE_H_
-#define QUEUE_H_
-
-#include <cstring>
-#include <cstdlib>
-#include <cmath>
-#include <iostream>
-#include <vector>
-#include <pthread.h>
+#ifndef _QED_STATIC_H_
+#define _QED_STATIC_H_
 
 #include "qed_base.h"
 
