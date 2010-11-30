@@ -1,3 +1,12 @@
+/*
+ * qed_base.h
+ *
+ * Queue Enchaned With Dynamic sizing base classes.
+ *
+ *  Created on: Nov 29, 2010
+ *      Author: jongsoo
+ */
+
 #ifndef _QED_BASE_H_
 #define _QED_BASE_H_
 
