@@ -375,7 +375,6 @@ public :
 
   bool reserveDequeue(PackedIndex *ret) {
     PackedIndex temp;
-    int mod;
     do {
       ret->l = head.l;
       if (isEmpty(*ret)) {
@@ -392,7 +391,7 @@ public :
 #if QED_TRACE_LEVEL >= 2
     isSpinningEmpty = false;
 #endif
-    traceReserveDequeue(mod);
+    traceReserveDequeue(ret->i[1]);
 
     return true;
   }
@@ -929,7 +928,6 @@ public :
    */
   bool reserveDequeue(PackedIndex *ret) {
     PackedIndex temp;
-    int mod;
     do {
       ret->l = head.l;
       if (isEmpty(*ret)) {
@@ -937,7 +935,7 @@ public :
       }
 
       temp.i[0] = ret->i[0] + 1;
-      temp.i[1] = (mod + 1)&(C - 1);
+      temp.i[1] = (ret->i[0] + 1)&(C - 1);
 
     } while (!__sync_bool_compare_and_swap(&head.l, ret->l, temp.l));
 
@@ -946,7 +944,7 @@ public :
 #if QED_TRACE_LEVEL >= 2
     isSpinningEmpty = false;
 #endif
-    traceReserveDequeue(mod);
+    traceReserveDequeue(ret->i[1]);
 
     return true;
   }
