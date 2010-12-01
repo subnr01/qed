@@ -10,13 +10,17 @@
 #ifndef _QED_BASE_H_
 #define _QED_BASE_H_
 
+#include <cassert>
 #include <cstdarg>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 
 namespace qed {
 
-// Allocate at cache line boundaries.
+/**
+ * malloc at cache line boundaries.
+ */
 template<class T>
 T * const alignedMalloc(size_t n) {
   long addr = (long)malloc((n + 64)*sizeof(T));
@@ -24,6 +28,9 @@ T * const alignedMalloc(size_t n) {
   return (T *)ptr;
 }
 
+/**
+ * calloc at cache line boundaries.
+ */
 template<class T>
 T * const alignedCalloc(size_t n) {
   long addr = (long)calloc((n + 64), sizeof(T));
@@ -31,8 +38,15 @@ T * const alignedCalloc(size_t n) {
   return (T *)ptr;
 }
 
+/**
+ * The size of buffer that holds traces.
+ * When we have more traces than this number, old traces will be overwritten.
+ */
 static const int TRACE_LENGTH = 65536*4;
 
+/**
+ * Read TSC (Time Stamp Counter) hardware performance counter
+ */
 static inline unsigned long long int readTsc(void)
 {
   unsigned a, d;
@@ -42,6 +56,9 @@ static inline unsigned long long int readTsc(void)
   return ((unsigned long long)a) | (((unsigned long long)d) << 32);
 }
 
+/**
+ * EventId used in our trace functions
+ */
 enum EventId {
   SET_CAPACITY = 0,
   RESERVE_ENQUEUE,
@@ -52,19 +69,34 @@ enum EventId {
   EMPTY,
 };
 
+/**
+ * A trace record
+ */
 struct Trace {
   unsigned long long tsc;
   EventId id;
   int value;
 };
 
-/*
- * The base class of our queue interface.
+/**
+ * @return true if i is a power of two
+ */
+static inline bool is2ToN(int i) {
+  return ((i - 1)&i) == 0;
+}
+
+/**
+ * The class at the very top of hour queue class hierarchy.
  */
 template<class T>
 class BaseQ {
 public :
+
+  /**
+   * @param N capacity of the queue. Must be a power of two
+   */
   BaseQ(size_t N) : N(N), buf(alignedMalloc<T>(N)) {
+    assert(is2ToN(N)); // N should be a power of two.
 #if QED_TRACE_LEVEL > 0
     memset(traces, 0, sizeof(traces));
     traceIndex = 0;
@@ -75,6 +107,9 @@ public :
 #endif
   }
 
+  /**
+   * @return the pointer to the circular array
+   */
   T * const getBuf() {
     return buf;
   }
@@ -83,10 +118,16 @@ public :
     return N;
   }
 
+  /**
+   * Dump traces to stdout.
+   */
   void dumpToCout() __attribute__((noinline)) {
     dump(std::cout);
   }
 
+  /**
+   * Dump traces to stdout in a human friendly format.
+   */
   void dumpToCoutHumanFriendy() __attribute__((noinline)) {
     dumpHumanFriendly(std::cout);
   }
@@ -243,7 +284,10 @@ protected :
   using BaseQ<T>::traceCommitEnqueue; \
   using BaseQ<T>::traceCommitDequeue; \
   using BaseQ<T>::traceFull; \
-  using BaseQ<T>::traceEmpty;
+  using BaseQ<T>::traceEmpty; \
+  int size() const { \
+    return getTailIndex() - getHeadIndex(); \
+  }
 
 #if QED_TRACE_LEVEL >= 2
 #define QED_USING_BASEQ_MEMBERS \
