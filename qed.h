@@ -251,6 +251,7 @@ public :
     }
     else {
       ret->i[0] = headIndex;
+      headIndexMod &= C - 1;
       ret->i[1] = headIndexMod;
       traceReserveDequeue(ret->i[1]);
       return true;
@@ -347,6 +348,7 @@ public :
       if (shouldExpand(d2, localC, minSize)) {
         localC <<= 1;
         C = localC;
+        __sync_synchronize();
         traceResizing(localC);
       }
       else {
@@ -357,6 +359,7 @@ public :
     else if (shouldShrink(mod, d2, maxSize)) {
       localC = mod;
       C = localC;
+      __sync_synchronize();
       minSize = INT_MAX;
       maxSize = 0;
       traceResizing(localC);
@@ -366,7 +369,7 @@ public :
     presence[tailIndexMod] = 1;
     traceCommitEnqueue(tailIndexMod);
     localTailIndex++;
-    tailIndex = localTailIndex;
+    tailIndex = localTailIndex; // tailIndex must be modified after C
     tailIndexMod = mod&(localC - 1);
 
     minSize = std::min(minSize, d1);
@@ -375,17 +378,22 @@ public :
 
   bool reserveDequeue(PackedIndex *ret) {
     PackedIndex temp;
+    int mod;
     do {
+      int localC = C;
       ret->l = head.l;
-      if (isEmpty(*ret)) {
+      mod = ret->i[1]&(localC - 1);
+      if (!presence[mod] || ret->i[0] == tailIndex) {
+        traceEmpty();
         return false;
       }
       
       temp.i[0] = ret->i[0] + 1;
-      temp.i[1] = (ret->i[1] + 1)&(C - 1);
+      temp.i[1] = (mod + 1)&(localC - 1);
 
     } while (!__sync_bool_compare_and_swap(&head.l, ret->l, temp.l));
 
+    ret->i[1] = mod;
     __sync_fetch_and_add(&reservedDequeueCounter, 1);
 
 #if QED_TRACE_LEVEL >= 2
@@ -407,7 +415,7 @@ public :
   }
 
   bool isEmpty(const PackedIndex& h) {
-    bool ret = !presence[h.i[1]] || h.i[0] == tailIndex;
+    bool ret = !presence[h.i[1]&(C - 1)] || h.i[0] == tailIndex;
     traceEmpty(ret);
     return ret;
   }
@@ -610,36 +618,10 @@ public :
   }
 
   bool isEmpty() {
-    if (headIndexMod >= C) {
-      assert(headIndexMod < 2*C);
-      headIndexMod &= C - 1;
-      assert(headIndexMod == 0);
-      if (!presence[0]) {
-        traceEmpty();
-        return true;
-      }
-      else {
-#if QED_TRACE_LEVEL >= 2
-        isSpinningEmpty = false;
-#endif
-        return false;
-      }
-    }
-    else if (presence[headIndexMod]) {
-#if QED_TRACE_LEVEL >= 2
-      isSpinningEmpty = false;
-#endif
-      return false;
-    }
-    else {
-      traceEmpty();
-      return true;
-    }
-
-    // FIXME - Why the following code doesn't work for dedup?
-    /*bool ret = !presence[headIndexMod];
+    headIndexMod &= C - 1;
+    bool ret = !presence[headIndexMod];
     traceEmpty(ret);
-    return ret;*/
+    return ret;
   }
 
   bool isFull(int seqId) const {
@@ -788,6 +770,7 @@ public :
   }
 
   bool isEmpty() {
+    headIndexMod &= C - 1;
     bool ret = !presence[headIndexMod];
     traceEmpty(ret);
     return ret;
@@ -868,6 +851,8 @@ public :
 
       if (shouldExpand(d2, localC, minSize)) {
         localC <<= 1;
+        C = localC;
+        __sync_synchronize();
         traceResizing(localC);
       }
       else if (presence[0]) {
@@ -884,14 +869,15 @@ public :
     // If it's almost empty.
     else if (shouldShrink(mod, d2, maxSize) && !presence[0]) {
       localC = mod;
+      C = localC;
+      __sync_synchronize();
       mod = 0;
       minSize = INT_MAX;
       maxSize = 0;
       traceResizing(localC);
     }
 
-    C = localC;
-    tailIndex = t + 1; // tailIndex must be modified after modification of C
+    tailIndex = t + 1; // tailIndex must be modified after C
     tailIndexMod = mod + 1;
 
     int d1 = t - h - reservedEnqueueCounter;
@@ -928,23 +914,28 @@ public :
    */
   bool reserveDequeue(PackedIndex *ret) {
     PackedIndex temp;
+    int mod;
     do {
+      int localC = C;
       ret->l = head.l;
-      if (isEmpty(*ret)) {
+      mod = ret->i[1]&(localC - 1);
+      if (!presence[mod] || ret->i[0] == tailIndex) {
+        traceEmpty();
         return false;
       }
 
       temp.i[0] = ret->i[0] + 1;
-      temp.i[1] = (ret->i[0] + 1)&(C - 1);
+      temp.i[1] = (mod + 1)&(localC - 1);
 
     } while (!__sync_bool_compare_and_swap(&head.l, ret->l, temp.l));
 
+    ret->i[1] = mod;
     __sync_fetch_and_add(&reservedDequeueCounter, 1);
 
 #if QED_TRACE_LEVEL >= 2
     isSpinningEmpty = false;
 #endif
-    traceReserveDequeue(ret->i[1]);
+    traceReserveDequeue(mod);
 
     return true;
   }
@@ -960,7 +951,7 @@ public :
   }
 
   bool isEmpty(const PackedIndex &h) {
-    bool ret = !presence[h.i[1]] || h.i[0] == tailIndex;
+    bool ret = !presence[h.i[1]&(C - 1)] || h.i[0] == tailIndex;
     traceEmpty(ret);
     return ret;
   }
