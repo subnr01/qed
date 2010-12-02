@@ -94,15 +94,6 @@ static inline int log2(int x) {
   return y;
 }
 
-static inline int log2(int n) {
-  int ret = 0;
-  while (n > 1) {
-    n >>= 1;
-    ret++;
-  }
-  return ret;
-}
-
 /**
  * The base class of QED.
  *
