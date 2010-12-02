@@ -86,7 +86,7 @@ static inline bool is2ToN(int i) {
 }
 
 /**
- * The class at the very top of hour queue class hierarchy.
+ * The class at the very top of our queue class hierarchy.
  */
 template<class T>
 class BaseQ {
