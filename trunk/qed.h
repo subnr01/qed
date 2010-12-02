@@ -82,7 +82,7 @@ typedef union {
     char C;
   };
   long l;
-} PackedIndicesAndC;
+} PackedIndicesAndC; // XXX(jiwon): name not conisstent. maybe PackedIndexAndC ^^;;;
 
 static inline int modPowerOf2(int n, int power) {
   return n&((1 << power) - 1); 
