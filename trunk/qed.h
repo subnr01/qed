@@ -75,7 +75,33 @@ static inline int physicalIndexOf(const PackedIndex& i) {
   return i.i[1];
 }
 
-#define USE_SPIN_LOCK
+typedef union {
+  struct {
+    int logicalIndex;
+    int physicalIndex:24;
+    char C;
+  };
+  long l;
+} PackedIndicesAndC;
+
+static inline int modPowerOf2(int n, int power) {
+  return n&((1 << power) - 1); 
+}
+
+static inline int log2(int x) {
+  int y;
+  asm("bsr %1, %0\n" : "=r" (y) : "r" (x));
+  return y;
+}
+
+static inline int log2(int n) {
+  int ret = 0;
+  while (n > 1) {
+    n >>= 1;
+    ret++;
+  }
+  return ret;
+}
 
 /**
  * The base class of QED.
@@ -399,7 +425,7 @@ public :
 #if QED_TRACE_LEVEL >= 2
     isSpinningEmpty = false;
 #endif
-    traceReserveDequeue(ret->i[1]);
+    traceReserveDequeue(mod);
 
     return true;
   }
@@ -449,126 +475,74 @@ private :
 };
 
 /**
- * A convenient mid-level class for QED that uses a lock.
- */
-template<class T>
-class QedWithLock : public BaseQed<T> {
-public :
-  QedWithLock(int minC, size_t maxC) :
-    BaseQed<T>(minC, maxC),
-    presence((volatile int * const)alignedCalloc<int>(BaseQ<T>::N)) {
-#ifdef USE_SPIN_LOCK
-    pthread_spin_init(&lock_, PTHREAD_PROCESS_PRIVATE);
-#else
-    pthread_mutex_init(&lock_, NULL);
-#endif
-  }
-
-protected :
-  void lock() {
-#ifdef USE_SPIN_LOCK
-    pthread_spin_lock(&lock_);
-#else
-    pthread_mutex_lock(&lock_);
-#endif
-  }
-
-  void unlock() {
-#ifdef USE_SPIN_LOCK
-    pthread_spin_unlock(&lock_);
-#else
-    pthread_mutex_unlock(&lock_);
-#endif
-  }
-
-private :
-#ifdef USE_SPIN_LOCK
-  pthread_spinlock_t lock_ __attribute__((aligned (64)));
-#else
-  pthread_mutex_t lock_ __attribute__((aligned (64)));
-#endif
-
-protected :
-  volatile int * const presence __attribute__((aligned (64)));
-};
-
-#define QED_USING_QED_WITH_LOCK_MEMBERS \
-  QED_USING_BASE_QED_MEMBERS \
-  using QedWithLock<T>::lock; \
-  using QedWithLock<T>::unlock; \
-  using QedWithLock<T>::presence;
-
-/**
  * Unordered MPSC queue.
  */
 template<class T>
-class ScQed : public QedWithLock<T> {
+class ScQed : public BaseQed<T> {
 public :
   ScQed(int minC = 64, const int maxC = MAX_QLEN) :
-    QedWithLock<T>(minC, maxC),
+    BaseQed<T>(minC, maxC),
+    presence((volatile int * const)alignedCalloc<int>(N)),
     headIndex(0), tailIndex(0),
-    tailIndexMod(0), C(std::min(std::max(DEFAULT_SIZE, minC), maxC)),
+    tailIndexMod(0), C(log2(std::min(std::max(DEFAULT_SIZE, minC), maxC))),
     minSize(INT_MAX), maxSize(0), reservedEnqueueCounter(0), headIndexMod(0) {
   }
 
-  QED_USING_QED_WITH_LOCK_MEMBERS
+  QED_USING_BASE_QED_MEMBERS
 
   bool reserveEnqueue(PackedIndex *ret) {
-    int h = headIndex;
+    PackedIndicesAndC oldPacked, newPacked; 
+    int h, t, mod, d2;
 
-    if (tailIndex - h >= C || presence[tailIndexMod]) {
-      traceFull();
-      return false;
-    }
+    do {
+      h = headIndex;
+      oldPacked.l = packedTailIndicesAndC;
 
-    lock();
+      t = oldPacked.logicalIndex;
+      mod = oldPacked.physicalIndex;
+      int localC = 1 << oldPacked.C;
 
-    int t = tailIndex;
-    int mod = tailIndexMod;
-    int localC = C;
+      newPacked.l = oldPacked.l;
 
-    if (t - h >= localC || presence[mod]) {
-      unlock();
-      traceFull();
-      return false;
-    }
-
-    int d2 = t - h;
-    if (mod >= localC) {
-      assert(mod < 2*localC);
-
-      if (shouldExpand(d2, localC, minSize)) {
-        localC <<= 1;
-        traceResizing(localC);
-      }
-      else if (presence[0]) {
-        unlock();
+      d2 = t - h;
+      if (d2 >= localC || presence[mod]) {
         traceFull();
         return false;
       }
-      else {
+
+      if (mod >= localC) {
+        assert(mod < 2*localC);
+
+        if (shouldExpand(d2, localC, minSize)) {
+          newPacked.C = oldPacked.C + 1;
+          traceResizing(localC << 1);
+        }
+        else if (presence[0]) {
+          traceFull();
+          return false;
+        }
+        else {
+          mod = 0;
+          minSize = INT_MAX;
+          maxSize = 0;
+        }
+      }
+      else if (shouldShrink(mod, d2, maxSize) && !presence[0]) {
+        newPacked.C = log2(mod);
         mod = 0;
         minSize = INT_MAX;
         maxSize = 0;
+        traceResizing(mod);
       }
-    }
-    else if (shouldShrink(mod, d2, maxSize) && !presence[0]) {
-      localC = mod;
-      mod = 0;
-      minSize = INT_MAX;
-      maxSize = 0;
-      traceResizing(localC);
-    }
 
-    C = localC;
-    tailIndex = t + 1; // tailIndex must be modified after modification of C
-    tailIndexMod = mod + 1;
+      newPacked.logicalIndex = t + 1;
+      newPacked.physicalIndex = mod + 1;
+    } while (!__sync_bool_compare_and_swap(
+      &packedTailIndicesAndC, oldPacked.l, newPacked.l));
 
     int d1 = d2 - reservedEnqueueCounter;
     minSize = std::min<volatile int>(minSize, d1);
     maxSize = std::max<volatile int>(maxSize, d2);
-
-    unlock();
 
     ret->i[0] = t;
     ret->i[1] = mod;
@@ -586,7 +560,7 @@ public :
    * @param t the reserved physical index
    */
   void commitEnqueue(int t) {
-    assert(t < C);
+    assert(t < (1 << C));
     assert(!presence[t]);
     presence[t] = 1;
     __sync_fetch_and_add(&reservedEnqueueCounter, -1);
@@ -594,38 +568,47 @@ public :
   }
 
   bool reserveDequeue(PackedIndex *ret) {
-    if (isEmpty()) {
+    PackedIndicesAndC packed;
+    packed.l = packedTailIndicesAndC;
+    int localC = 1 << packed.C;
+    int mod = headIndexMod&(localC - 1);
+    if (!presence[mod] || headIndex == packed.logicalIndex) {
+      traceEmpty();
       return false;
     }
-    else {
-      ret->i[0] = headIndex;
-      ret->i[1] = headIndexMod;
-      traceReserveDequeue(ret->i[1]);
-      return true;
-    }
+
+    ret->i[0] = headIndex;
+    ret->i[1] = mod;
+    headIndexMod = mod;
+
+#if QED_TRACE_LEVEL >= 2
+    isSpinningEmpty = false;
+#endif
+    traceReserveDequeue(mod);
+    return true;
   }
 
   /**
    * @param h a dummy argument to make the interface consistent
    */
   void commitDequeue(int h = 0) {
-    assert(headIndexMod < C);
+    assert(headIndexMod < (1 << C));
     assert(presence[headIndexMod]);
     presence[headIndexMod] = 0;
     traceCommitDequeue(headIndexMod);
-    headIndexMod = (headIndexMod + 1)&(C - 1);
+    headIndexMod = modPowerOf2(headIndexMod + 1, C);
     headIndex++;
   }
 
   bool isEmpty() {
-    headIndexMod &= C - 1;
+    headIndexMod &= (1 << C) - 1;
     bool ret = !presence[headIndexMod];
     traceEmpty(ret);
     return ret;
   }
 
   bool isFull(int seqId) const {
-    return presence[seqId] || seqId - headIndex >= C;
+    return presence[seqId] || seqId - headIndex >= (1 << C);
   }
 
   int getHeadIndex() const {
@@ -637,30 +620,44 @@ public :
   }
 
 private :
+  volatile int * const presence __attribute__((aligned (64)));
   volatile int headIndex __attribute__((aligned (64)));
-  volatile int tailIndex __attribute__((aligned (64)));
-  volatile int tailIndexMod;
-  volatile int C;
+  volatile union {
+    struct {
+      int tailIndex;
+      int tailIndexMod:24;
+      char C;
+    };
+    volatile long packedTailIndicesAndC;
+  } __attribute__((aligned (64)));
   volatile int minSize, maxSize;
   volatile int reservedEnqueueCounter;
   int headIndexMod __attribute__((aligned (64)));
 };
 
+#define QED_USE_SPIN_LOCK
+
 /**
  * Ordered MPSC queue.
  */
 template<class T>
-class OrderedScQed : public QedWithLock<T> {
+class OrderedScQed : public BaseQed<T> {
 public :
   OrderedScQed(int minC = 64, const int maxC = MAX_QLEN) :
-    QedWithLock<T>(minC, maxC),
+    BaseQed<T>(minC, maxC),
+    presence((volatile int * const)alignedCalloc<int>(BaseQ<T>::N)),
     headIndex(0), maxSeqId(0),
     tailIndexBase(0), C(std::min(std::max(DEFAULT_SIZE, minC), maxC)),
     minSize(INT_MAX), maxSize(0), reservedEnqueueCounter(0),
     headIndexMod(0) {
+#ifdef QED_USE_SPIN_LOCK
+    pthread_spin_init(&lock_, PTHREAD_PROCESS_PRIVATE);
+#else
+    pthread_mutex_init(&lock_, NULL);
+#endif
   }
 
-  QED_USING_QED_WITH_LOCK_MEMBERS
+  QED_USING_BASE_QED_MEMBERS
 
   /**
    * @param ret caller sets the logical index of the item to enqueue.
@@ -794,6 +791,28 @@ public :
   }
 
 private :
+  void lock() {
+#ifdef QED_USE_SPIN_LOCK
+    pthread_spin_lock(&lock_);
+#else
+    pthread_mutex_lock(&lock_);
+#endif
+  }
+
+  void unlock() {
+#ifdef QED_USE_SPIN_LOCK
+    pthread_spin_unlock(&lock_);
+#else
+    pthread_mutex_unlock(&lock_);
+#endif
+  }
+
+#ifdef QED_USE_SPIN_LOCK
+  pthread_spinlock_t lock_ __attribute__((aligned (64)));
+#else
+  pthread_mutex_t lock_ __attribute__((aligned (64)));
+#endif
+  volatile int * const presence __attribute__((aligned (64)));
   volatile int headIndex __attribute__((aligned (64)));
   volatile int maxSeqId __attribute__((aligned (64)));
   volatile int tailIndexBase;
@@ -807,19 +826,20 @@ private :
  * Unordered MPMC queue
  */
 template<class T>
-class Qed : public QedWithLock<T> {
+class Qed : public BaseQed<T> {
 public :
   Qed(int minC = 64, const int maxC = MAX_QLEN) :
-    QedWithLock<T>(minC, maxC),
+    BaseQed<T>(minC, maxC),
+    presence((volatile int * const)alignedCalloc<int>(N)),
     reservedDequeueCounter(0),
     tailIndex(0), tailIndexMod(0),
-    C(std::min(std::max(DEFAULT_SIZE, minC), maxC)),
+    C(log2(std::min(std::max(DEFAULT_SIZE, minC), maxC))),
     minSize(INT_MAX), maxSize(0), 
     reservedEnqueueCounter(0) {
     head.l = 0;
   }
 
-  QED_USING_QED_WITH_LOCK_MEMBERS
+  QED_USING_BASE_QED_MEMBERS
 
   /**
    * @param ret points to reserved index
@@ -827,69 +847,63 @@ public :
    * @return true if reservation is sucessful.
    */
   bool reserveEnqueue(PackedIndex *ret) {
-    int h = head.i[0];
-    if (tailIndex - h >= C || presence[tailIndexMod]) {
-      traceFull();
-      return false;
-    }
+    PackedIndicesAndC oldPacked, newPacked; 
+    int h, t, mod, d2;
 
-    lock();
+    do {
+      h = head.i[0];
+      oldPacked.l = packedTailIndicesAndC;
 
-    int t = tailIndex;
-    int mod = tailIndexMod;
-    int localC = C;
+      t = oldPacked.logicalIndex;
+      mod = oldPacked.physicalIndex;
+      int localC = 1 << oldPacked.C;
 
-    if (t - h >= localC || presence[mod]) {
-      unlock();
-      traceFull();
-      return false;
-    }
+      newPacked.l = oldPacked.l;
 
-    int d2 = t - h + reservedDequeueCounter;
-    if (mod >= localC) {
-      assert(mod < 2*localC);
-
-      if (shouldExpand(d2, localC, minSize)) {
-        localC <<= 1;
-        C = localC;
-        __sync_synchronize();
-        traceResizing(localC);
-      }
-      else if (presence[0]) {
-        unlock();
+      if (t - h >= localC || presence[mod]) {
         traceFull();
         return false;
       }
-      else {
+
+      d2 = t - h + reservedDequeueCounter;
+      if (mod >= localC) {
+        assert(mod < 2*localC);
+
+        if (shouldExpand(d2, localC, minSize)) {
+          newPacked.C = oldPacked.C + 1;
+          traceResizing(localC << 1);
+        }
+        else if (presence[0]) {
+          traceFull();
+          return false;
+        }
+        else {
+          mod = 0;
+          minSize = INT_MAX;
+          maxSize = 0;
+        }
+      }
+      else if (shouldShrink(mod, d2, maxSize) && !presence[0]) {
+        newPacked.C = log2(mod);
         mod = 0;
         minSize = INT_MAX;
         maxSize = 0;
+        traceResizing(mod);
       }
-    }
-    // If it's almost empty.
-    else if (shouldShrink(mod, d2, maxSize) && !presence[0]) {
-      localC = mod;
-      C = localC;
-      __sync_synchronize();
-      mod = 0;
-      minSize = INT_MAX;
-      maxSize = 0;
-      traceResizing(localC);
-    }
 
-    tailIndex = t + 1; // tailIndex must be modified after C
-    tailIndexMod = mod + 1;
+      newPacked.logicalIndex = t + 1;
+      newPacked.physicalIndex = mod + 1;
+    } while (!__sync_bool_compare_and_swap(
+      &packedTailIndicesAndC, oldPacked.l, newPacked.l));
 
     int d1 = t - h - reservedEnqueueCounter;
     minSize = std::min<volatile int>(minSize, d1);
     maxSize = std::max<volatile int>(maxSize, d2);
 
-    unlock();
-
     ret->i[0] = t;
     ret->i[1] = mod;
     __sync_fetch_and_add(&reservedEnqueueCounter, 1);
-    
+
 #if QED_TRACE_LEVEL >= 2
     isSpinningFull = false;
 #endif
@@ -902,7 +916,7 @@ public :
    * @param t the reserved physical index
    */
   void commitEnqueue(int t) {
-    assert(t < C);
+    assert(t < (1 << C));
     assert(!presence[t]);
     presence[t] = 1;
     __sync_fetch_and_add(&reservedEnqueueCounter, -1);
@@ -916,16 +930,18 @@ public :
     PackedIndex temp;
     int mod;
     do {
-      int localC = C;
+      PackedIndicesAndC packed;
+      packed.l = packedTailIndicesAndC;
+      int localC = packed.C;
       ret->l = head.l;
-      mod = ret->i[1]&(localC - 1);
-      if (!presence[mod] || ret->i[0] == tailIndex) {
+      mod = modPowerOf2(ret->i[1], localC);
+      if (!presence[mod] || ret->i[0] == packed.logicalIndex) {
         traceEmpty();
         return false;
       }
 
       temp.i[0] = ret->i[0] + 1;
-      temp.i[1] = (mod + 1)&(localC - 1);
+      temp.i[1] = modPowerOf2(mod + 1, localC);
 
     } while (!__sync_bool_compare_and_swap(&head.l, ret->l, temp.l));
 
@@ -951,7 +967,7 @@ public :
   }
 
   bool isEmpty(const PackedIndex &h) {
-    bool ret = !presence[h.i[1]&(C - 1)] || h.i[0] == tailIndex;
+    bool ret = !presence[modPowerOf2(h.i[1], C)] || h.i[0] == tailIndex;
     traceEmpty(ret);
     return ret;
   }
@@ -961,7 +977,7 @@ public :
   }
 
   bool isFull(int i) const {
-    return presence[i] || tailIndex - head.i[0] >= C;
+    return presence[i] || tailIndex - head.i[0] >= (1 << C);
   }
 
   int getHeadIndex() const {
@@ -973,11 +989,17 @@ public :
   }
 
 private :
+  volatile int * const presence __attribute__((aligned (64)));
   volatile PackedIndex head __attribute__((aligned (64)));
   volatile int reservedDequeueCounter;
-  volatile int tailIndex __attribute__((aligned (64)));
-  volatile int tailIndexMod;
-  volatile int C;
+  volatile union {
+    struct {
+      int tailIndex;
+      int tailIndexMod:24;
+      char C;
+    };
+    volatile long packedTailIndicesAndC;
+  } __attribute__((aligned (64)));
   volatile int minSize, maxSize;
   volatile int reservedEnqueueCounter;
 };
