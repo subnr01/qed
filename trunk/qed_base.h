@@ -285,6 +285,12 @@ protected :
   using BaseQ<T>::traceCommitDequeue; \
   using BaseQ<T>::traceFull; \
   using BaseQ<T>::traceEmpty; \
+  int getHeadIndex() const { \
+    return headIndex; \
+  } \
+  int getTailIndex() const { \
+    return tailIndex; \
+  } \
   int size() const { \
     return getTailIndex() - getHeadIndex(); \
   }
