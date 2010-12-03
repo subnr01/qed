@@ -60,20 +60,6 @@ class BaseStaticQ : public BaseQ<T> {
 public :
   BaseStaticQ(size_t N) : BaseQ<T>(N), headIndex(0), tailIndex(0) { }
 
-  /**
-   * @return the logical head index value
-   */
-  int getHeadIndex() const {
-    return headIndex;
-  }
-
-  /**
-   * @return the logical tail index value
-   */
-  int getTailIndex() const {
-    return tailIndex;
-  }
-
 protected :
   // The following variables are aligned at the cache line boundary
   // to avoid false sharing.
@@ -97,8 +83,6 @@ protected :
   QED_USING_BASEQ_MEMBERS \
   using BaseStaticQ<T>::headIndex; \
   using BaseStaticQ<T>::tailIndex; \
-  using BaseStaticQ<T>::getHeadIndex; \
-  using BaseStaticQ<T>::getTailIndex; \
   bool reserveEnqueue(T **out) { \
     int t; \
     if (reserveEnqueue(&t)) { \
