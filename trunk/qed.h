@@ -581,7 +581,7 @@ public :
     packed.l = packedTailIndexAndC;
     int localC = 1 << packed.c;
     int mod = headIndexMod&(localC - 1);
-    if (!presence[mod] || headIndex >= packed.logical) {
+    if (!presence[mod]) {
       traceEmpty();
       return false;
     }
