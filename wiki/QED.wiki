@@ -1,11 +1,70 @@
-#summary One-sentence summary of this page.
+#summary This page describes qed (Queue Enhanced with Dynamic sizing)
 
 = Introduction =
 
-Add your content here.
+Qed is a lock-free circular-array based concurrent queue implementation which adjusts its capacity at run-time. The intended usage case of qed is buffering data between stages in pipeline-parallel applications. There is a trade-off between degree of parallelism and inter-stage buffer space: buffers too small cannot accommodate the run-time variance of applications, while buffers too large incur cache or TLB misses. Qed automatically adjusts its capacity at run-time so that parallelism can be maximized while keeping memory foot-print minimal.
 
+There are other ways to find a sweet spot of the trade-offs. First, we could search the smallest static queue capacities that maximizes the execution time for given training input data. However, this requires potentially long search time and need for finding a representative training data set. Second, we could use linked-list based concurrent queues such as Michael and Scott's queue. However, they have overhead associated with dynamic memory allocation.
+
+Qed maintains the efficiency of circular-array based queues but also automatically adjusts its capacity at run-time so that programmer doesn't need to worry about queue sizing.
+
+= Two Phase Interface =
+
+As opposed to conventional interface where an enqueue or a dequeue is done in a single function call, qed requires two phase (reserve and commit) interface for both enqueue and dequeue. The following code shows an example
+
+{{{
+// In producer thread
+Element *out;
+while (!q->reserveEnqueue(&out));
+... // writes to out
+q->commitEnqueue(out);
+
+// In consumer thread
+Element *in;
+while (!q->reserveDequeue(&in));
+... // reads from in
+q->commitDequeue(in);
+}}}
+
+When reserveEnqueue returns true, it is safe to modify reserved element. After finishing the modification, we call commitEnqueue so that the reserved location can be released. The motivation for having this two phase interface is to do in-place computation instead of copying a large chunk of data or passing pointer after dynamic memory allocation. Suppose that we don't have such two phase interface, then one option would be copying elements to or from the queue as follows:
+
+{{{
+// In producer thread
+Element out; // assume Element is large
+... // writes to out
+while (q->isFull());
+q->enqueue(out); // WARNING: memcpy of large data!!!
+}}}
+
+The other option would be passing pointer after dynamic memory allocation as follows:
+
+{{{
+// In producer thread
+Element *out = new Element(); // WARNING: dynamic memory allocation!!!
+... // writes to out
+while (q->isFull());
+q->enqueue(out);
+
+// In consumer thread
+while (q->isEmpty());
+Element *in = q->dequeue();
+... // reads from in
+delete in; // WARNING: dynamic memory deallocation!!!
+}}}
+
+As you have seen, the both approach may involve an excessive overhead, which motivates our two phase interface.
+
+= Capacity Adjustment =
+
+= Lock-free =
+
+A common strategy to implement a lock-free data structure is that 1) copy the current state to local store, 2) modify the current state within the local store, and 3) try to modify the glocal state using compare and swap. Succeeding the third step (compare-and-swap, or in short cas) means that no body has interfered during the modification (ignoring ABA problem. If you are not familiar with ABA problem, please refer to "The Art of Multiprocessor Programming").
+
+The challenge is that how to compact all the stages into 64-bit, which is the maximum size that the current x86 architecture supports compare-and-swap instructions. In our implementation, the capacity is modified by only by a producer.
 
 = Assumptions =
+
+The current qed implementation has the following assumptions, but later qed definitely can be implemented more platform independent way.
 
  * Architecture: 64-bit x86
  * Compiler: g++
