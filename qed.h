@@ -76,8 +76,16 @@ typedef union {
     int physical:24;
     char c;
   };
-  long l;
+  long l; /** for atomic updates */
 } PackedIndexAndC;
+
+typedef union {
+  struct {
+    int index;
+    int c;
+  };
+  long l; /** for atomic updates */
+} IndexAndC;
 
 static inline int modPowerOf2(int n, int power) {
   return n&((1 << power) - 1); 
@@ -205,7 +213,7 @@ public :
     c(std::min(std::max(DEFAULT_SIZE, minC), maxC)),
     tailIndexMod(0), headIndexMod(0),
     localC(std::min(std::max(DEFAULT_SIZE, minC), maxC)),
-    localTailIndex(0), minSize(INT_MAX), maxSize(0) {
+    minSize(INT_MAX), maxSize(0) {
   }
 
   QED_USING_BASE_QED_MEMBERS
@@ -256,6 +264,10 @@ public :
 
     tailIndex++;
     traceCommitEnqueue(tailIndexMod);
+    IndexAndC localTailIndexAndC;
+    localTailIndexAndC.index = tailIndex;
+    localTailIndexAndC.c = localC;
+    tailIndexAndC = localTailIndexAndC.l;
     tailIndexMod = mod&(localC - 1);
 
     minSize = std::min(minSize, d);
@@ -268,16 +280,22 @@ public :
    * @return true if reservation is successful.
    */
   bool reserveDequeue(PackedIndex *ret) {
-    if (isEmpty()) {
+    IndexAndC localTailIndexAndC;
+    localTailIndexAndC.l = tailIndexAndC;
+    int localC = localTailIndexAndC.c;
+    ret->logical = headIndex;
+    if (ret->logical >= localTailIndexAndC.index) {
+      traceEmpty();
       return false;
     }
-    else {
-      ret->logical = headIndex;
-      headIndexMod &= c - 1;
-      ret->physical = headIndexMod;
-      traceReserveDequeue(ret->physical);
-      return true;
-    }
+
+    headIndexMod &= localC - 1;
+    ret->physical = headIndexMod;
+#if QED_TRACE_LEVEL >= 2
+    isSpinningEmpty = false;
+#endif
+    traceReserveDequeue(ret->physical);
+    return true;
   }
 
   /**
@@ -291,17 +309,9 @@ public :
   }
 
   bool isEmpty() {
-    if (localTailIndex == headIndex) {
-      localTailIndex = tailIndex;
-      if (localTailIndex == headIndex) {
-        traceEmpty();
-        return true;
-      }
-    }
-#if QED_TRACE_LEVEL >= 2
-    isSpinningEmpty = false;
-#endif
-    return false;
+    bool ret = headIndex == tailIndex;
+    traceEmpty(ret);
+    return ret;
   }
 
   bool isFull() {
@@ -312,9 +322,14 @@ public :
 
 private :
   volatile int headIndex __attribute__((aligned (64)));
-  volatile int tailIndex __attribute__((aligned (64)));
-  volatile int c;
-  int tailIndexMod __attribute__((aligned (64))), headIndexMod, localC, localTailIndex;
+  union {
+    struct {
+      volatile int tailIndex;
+      volatile int c;
+    };
+    volatile long tailIndexAndC;
+  } __attribute__((aligned (64)));
+  int tailIndexMod __attribute__((aligned (64))), headIndexMod, localC;
   int minSize, maxSize;
 };
 
@@ -361,8 +376,6 @@ public :
       assert(mod < 2*localC);
       if (shouldExpand(d2, localC, minSize)) {
         localC <<= 1;
-        c = localC;
-        __sync_synchronize();
         traceResizing(localC);
       }
       else {
@@ -372,8 +385,6 @@ public :
     }
     else if (shouldShrink(mod, d2, maxSize)) {
       localC = mod;
-      c = localC;
-      __sync_synchronize();
       minSize = INT_MAX;
       maxSize = 0;
       traceResizing(localC);
@@ -383,7 +394,10 @@ public :
     presence[tailIndexMod] = 1;
     traceCommitEnqueue(tailIndexMod);
     localTailIndex++;
-    tailIndex = localTailIndex; // tailIndex must be modified after c
+    IndexAndC localTailIndexAndC;
+    localTailIndexAndC.index = localTailIndex;
+    localTailIndexAndC.c = localC;
+    tailIndexAndC = localTailIndexAndC.l;
     tailIndexMod = mod&(localC - 1);
 
     minSize = std::min(minSize, d1);
@@ -394,10 +408,12 @@ public :
     PackedIndex next;
     int mod;
     do {
-      int localC = c;
+      IndexAndC localTailIndexAndC;
+      localTailIndexAndC.l = tailIndexAndC;
+      int localC = localTailIndexAndC.c;
       ret->l = packedHeadIndex;
       mod = ret->physical&(localC - 1);
-      if (!presence[mod] || ret->logical== tailIndex) {
+      if (!presence[mod] || ret->logical >= localTailIndexAndC.index) {
         traceEmpty();
         return false;
       }
@@ -422,9 +438,9 @@ public :
    * @param h the reserved physical index
    */
   void commitDequeue(int h) {
+    __sync_fetch_and_add(&reservedDequeueCounter, -1);
     assert(presence[h]);
     presence[h] = 0;
-    __sync_fetch_and_add(&reservedDequeueCounter, -1);
     traceCommitDequeue(h);
   }
 
@@ -448,16 +464,21 @@ public :
 
 private :
   volatile int * const presence __attribute__((aligned (64)));
-  volatile union {
+  union {
     struct {
-      int headIndex;
-      int headIndexMod;
+      volatile int headIndex;
+      volatile int headIndexMod;
     };
     volatile long packedHeadIndex;
   } __attribute__((aligned (64)));
   volatile int reservedDequeueCounter;
-  volatile int tailIndex __attribute__((aligned (64)));
-  volatile int c;
+  union {
+    struct {
+      volatile int tailIndex;
+      volatile int c;
+    };
+    volatile long tailIndexAndC;
+  } __attribute__((aligned (64)));
   int localTailIndex __attribute__((aligned (64))), tailIndexMod, localC;
   int minSize, maxSize;
 };
@@ -560,7 +581,7 @@ public :
     packed.l = packedTailIndexAndC;
     int localC = 1 << packed.c;
     int mod = headIndexMod&(localC - 1);
-    if (!presence[mod] || headIndex == packed.logical) {
+    if (!presence[mod] || headIndex >= packed.logical) {
       traceEmpty();
       return false;
     }
@@ -602,11 +623,11 @@ public :
 private :
   volatile int * const presence __attribute__((aligned (64)));
   volatile int headIndex __attribute__((aligned (64)));
-  volatile union {
+  union {
     struct {
-      int tailIndex;
-      int tailIndexMod:24;
-      char c;
+      volatile int tailIndex;
+      volatile int tailIndexMod:24;
+      volatile char c;
     };
     volatile long packedTailIndexAndC;
   } __attribute__((aligned (64)));
@@ -907,7 +928,7 @@ public :
       int localC = packed.c;
       ret->l = packedHeadIndex;
       mod = modPowerOf2(ret->physical, localC);
-      if (!presence[mod] || ret->logical == packed.logical) {
+      if (!presence[mod] || ret->logical >= packed.logical) {
         traceEmpty();
         return false;
       }
@@ -956,19 +977,19 @@ public :
 
 private :
   volatile int * const presence __attribute__((aligned (64)));
-  volatile union {
+  union {
     struct {
-      int headIndex;
-      int headIndexMod;
+      volatile int headIndex;
+      volatile int headIndexMod;
     };
     volatile long packedHeadIndex;
   } __attribute__((aligned (64)));
   volatile int reservedDequeueCounter;
-  volatile union {
+  union {
     struct {
-      int tailIndex;
-      int tailIndexMod:24;
-      char c;
+      volatile int tailIndex;
+      volatile int tailIndexMod:24;
+      volatile char c;
     };
     volatile long packedTailIndexAndC;
   } __attribute__((aligned (64)));
