@@ -246,7 +246,6 @@ public :
       assert(mod < 2*localC);
       if (shouldExpand(d, localC, minSize)) {
         localC <<= 1;
-        c = localC;
         traceResizing(localC);
       }
       else {
@@ -256,16 +255,14 @@ public :
     }
     else if (shouldShrink(mod, d, maxSize)) {
       localC = tailIndexMod + 1;
-      c = localC;
       minSize = INT_MAX;
       maxSize = 0;
       traceResizing(localC);
     }
 
-    tailIndex++;
     traceCommitEnqueue(tailIndexMod);
     IndexAndC localTailIndexAndC;
-    localTailIndexAndC.index = tailIndex;
+    localTailIndexAndC.index = tailIndex + 1;
     localTailIndexAndC.c = localC;
     tailIndexAndC = localTailIndexAndC.l;
     tailIndexMod = mod&(localC - 1);
@@ -282,14 +279,13 @@ public :
   bool reserveDequeue(PackedIndex *ret) {
     IndexAndC localTailIndexAndC;
     localTailIndexAndC.l = tailIndexAndC;
-    int localC = localTailIndexAndC.c;
     ret->logical = headIndex;
     if (ret->logical >= localTailIndexAndC.index) {
       traceEmpty();
       return false;
     }
 
-    headIndexMod &= localC - 1;
+    headIndexMod &= localTailIndexAndC.c - 1;
     ret->physical = headIndexMod;
 #if QED_TRACE_LEVEL >= 2
     isSpinningEmpty = false;
@@ -345,8 +341,7 @@ public :
     headIndex(0), headIndexMod(0),
     reservedDequeueCounter(0),
     tailIndex(0), c(std::min(std::max(DEFAULT_SIZE, minC), maxC)),
-    localTailIndex(0), tailIndexMod(0),
-    localC(std::min(std::max(DEFAULT_SIZE, minC), maxC)),
+    tailIndexMod(0),
     minSize(INT_MAX), maxSize(0) {
   }
 
@@ -357,7 +352,7 @@ public :
       return false;
     }
     else {
-      ret->logical = localTailIndex;
+      ret->logical = tailIndex;
       ret->physical = tailIndexMod;
       traceReserveEnqueue(ret->physical);
       return true;
@@ -368,10 +363,12 @@ public :
    * @param t a dummy argument to make the interface consistent
    */
   void commitEnqueue(int t = 0) {
+    int localTailIndex = tailIndex;
     int d1 = localTailIndex - headIndex + 1;
     int d2 = d1 + reservedDequeueCounter;
 
     int mod = tailIndexMod + 1;
+    int localC = c;
     if (mod >= localC) {
       assert(mod < 2*localC);
       if (shouldExpand(d2, localC, minSize)) {
@@ -393,9 +390,8 @@ public :
     assert(!presence[tailIndexMod]);
     presence[tailIndexMod] = 1;
     traceCommitEnqueue(tailIndexMod);
-    localTailIndex++;
     IndexAndC localTailIndexAndC;
-    localTailIndexAndC.index = localTailIndex;
+    localTailIndexAndC.index = localTailIndex + 1;
     localTailIndexAndC.c = localC;
     tailIndexAndC = localTailIndexAndC.l;
     tailIndexMod = mod&(localC - 1);
@@ -413,7 +409,7 @@ public :
       int localC = localTailIndexAndC.c;
       ret->l = packedHeadIndex;
       mod = ret->physical&(localC - 1);
-      if (!presence[mod] || ret->logical >= localTailIndexAndC.index) {
+      if (ret->logical >= localTailIndexAndC.index || !presence[mod]) {
         traceEmpty();
         return false;
       }
@@ -479,7 +475,7 @@ private :
     };
     volatile long tailIndexAndC;
   } __attribute__((aligned (64)));
-  int localTailIndex __attribute__((aligned (64))), tailIndexMod, localC;
+  int tailIndexMod __attribute__((aligned (64)));
   int minSize, maxSize;
 };
 
@@ -928,7 +924,7 @@ public :
       int localC = packed.c;
       ret->l = packedHeadIndex;
       mod = modPowerOf2(ret->physical, localC);
-      if (!presence[mod] || ret->logical >= packed.logical) {
+      if (ret->logical >= packed.logical || !presence[mod]) {
         traceEmpty();
         return false;
       }
