@@ -67,6 +67,7 @@ enum EventId {
   COMMIT_DEQUEUE,
   FULL,
   EMPTY,
+  START,
 };
 
 /**
@@ -100,6 +101,7 @@ public :
 #if QED_TRACE_LEVEL > 0
     memset(traces, 0, sizeof(traces));
     traceIndex = 0;
+    traceStart();
 #endif
 #if QED_TRACE_LEVEL >= 2
     isSpinningFull = false;
@@ -141,6 +143,10 @@ public :
     t->value = value;
   }
 
+  void traceStart() {
+    trace(START, 0);
+  }
+
   void traceResizing(size_t newCapacity) {
     trace(SET_CAPACITY, newCapacity);
   }
@@ -167,7 +173,7 @@ public :
     }
     for (int i = begin; i < end; i++) {
       Trace *t = traces + (i&(TRACE_LENGTH - 1));
-      out << t->tsc << " ";
+      out << (t->tsc - traces[begin].tsc)/2.27/1000000000 << " ";
       switch (t->id) {
       case SET_CAPACITY: 
         out << "setCapacity";
@@ -190,12 +196,17 @@ public :
       case EMPTY :
         out << "empty";
         break;
+      case START :
+        out << "start";
+        break;
       }
       
       out << " " << t->value << std::endl;
     }
   }
 #else
+  void traceStart() { }
+
   void traceResizing(size_t newCapacity) { }
 
   void trace(const char *fmt, ...) { }
