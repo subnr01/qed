@@ -105,26 +105,26 @@ static inline int log2(int x) {
 template<class T>
 class BaseQed : public BaseQ<T> {
 public :
-  BaseQed(int minC, size_t maxC) : BaseQ<T>(maxC), minC(minC) {
+  BaseQed(size_t minC, size_t maxC) : BaseQ<T>(maxC), minC(minC) {
   }
 
 protected :
   /**
-   * @param d occupancy
+   * @param occ occupancy
    * @param c capacity
-   * @param minSize min occupancy during the last epoch
+   * @param minOcc min occupancy during the last epoch
    */
-  bool shouldExpand(int d, int c, int minSize, int maxSize) {
-    return d > 1 && maxSize - minSize >= (c >> 1) + (c >> 2);
+  bool shouldExpand(int occ, int c, int minOcc, int maxOcc) {
+    return occ > 1 && maxOcc - minOcc >= (c >> 1) + (c >> 2) && c < N;
   }
 
   /**
    * @param mod physical tail index
    * @param d occupancy
-   * @param maxSize max occpancy during the last epoch
+   * @param maxOcc max occpancy during the last epoch
    */
-  bool shouldShrink(int mod, int d, int minSize, int maxSize) {
-    return is2ToN(mod) && d < mod && maxSize - minSize < mod >> 2 && mod >= minC; 
+  bool shouldShrink(int mod, int occ, int minOcc, int maxOcc) {
+    return is2ToN(mod) && occ < mod && maxOcc - minOcc < mod >> 2 && mod >= minC; 
   }
 
   const int minC;
@@ -208,12 +208,12 @@ protected :
 template<class T>
 class SpscQed : public BaseQed<T> {
 public :
-  SpscQed(int minC = 64, const int maxC = MAX_QLEN) :
+  SpscQed(int minC = 64, int maxC = MAX_QLEN) :
     BaseQed<T>(minC, maxC), headIndex(0), tailIndex(0),
     c(std::min(std::max(DEFAULT_SIZE, minC), maxC)),
     tailIndexMod(0), headIndexMod(0),
     localC(std::min(std::max(DEFAULT_SIZE, minC), maxC)),
-    minSize(SHRT_MAX), maxSize(0) {
+    minOcc(SHRT_MAX), maxOcc(0) {
   }
 
   QED_USING_BASE_QED_MEMBERS
@@ -239,23 +239,23 @@ public :
    * @param t a dummy argument to make the interface consistent
    */
   void commitEnqueue(int t = 0) {
-    int d = tailIndex - headIndex + 1;
+    int occ = tailIndex - headIndex + 1;
     int mod = tailIndexMod + 1;
 
     if (mod >= localC) {
-      if (shouldExpand(d, localC, minSize, maxSize)) {
+      if (shouldExpand(occ, localC, minOcc, maxOcc)) {
         localC <<= 1;
         traceResizing(localC);
       }
       else {
-        maxSize = 0;
+        maxOcc = 0;
       }
-      minSize = SHRT_MAX;
+      minOcc = SHRT_MAX;
     }
-    else if (shouldShrink(mod, d, minSize, maxSize)) {
+    else if (shouldShrink(mod, occ, minOcc, maxOcc)) {
       localC = tailIndexMod + 1;
-      minSize = SHRT_MAX;
-      maxSize = 0;
+      minOcc = SHRT_MAX;
+      maxOcc = 0;
       traceResizing(localC);
     }
 
@@ -266,8 +266,8 @@ public :
     tailIndexAndC = localTailIndexAndC.l;
     tailIndexMod = mod&(localC - 1);
 
-    minSize = std::min(minSize, d);
-    maxSize = std::max(maxSize, d);
+    minOcc = std::min(minOcc, occ);
+    maxOcc = std::max(maxOcc, occ);
   }
 
   /**
@@ -325,7 +325,7 @@ private :
     volatile long tailIndexAndC;
   } __attribute__((aligned (64)));
   int tailIndexMod __attribute__((aligned (64))), headIndexMod, localC;
-  int minSize, maxSize;
+  int minOcc, maxOcc;
 };
 
 /**
@@ -341,7 +341,7 @@ public :
     reservedDequeueCounter(0),
     tailIndex(0), c(std::min(std::max(DEFAULT_SIZE, minC), maxC)),
     tailIndexMod(0),
-    minSize(SHRT_MAX), maxSize(0) {
+    minOcc(SHRT_MAX), maxOcc(0) {
   }
 
   QED_USING_BASE_QED_MEMBERS
@@ -363,24 +363,24 @@ public :
    */
   void commitEnqueue(int t = 0) {
     int localTailIndex = tailIndex;
-    int d1 = localTailIndex - headIndex + 1;
+    int occ1 = localTailIndex - headIndex + 1;
 
     int mod = tailIndexMod + 1;
     int localC = c;
     if (mod >= localC) {
-      if (shouldExpand(d1, localC, minSize, maxSize)) {
+      if (shouldExpand(occ1, localC, minOcc, maxOcc)) {
         localC <<= 1;
         traceResizing(localC);
       }
       else {
-        maxSize = 0;
+        maxOcc = 0;
       }
-      minSize = SHRT_MAX;
+      minOcc = SHRT_MAX;
     }
-    else if (shouldShrink(mod, d1, minSize, maxSize)) {
+    else if (shouldShrink(mod, occ1, minOcc, maxOcc)) {
       localC = mod;
-      minSize = SHRT_MAX;
-      maxSize = 0;
+      minOcc = SHRT_MAX;
+      maxOcc = 0;
       traceResizing(localC);
     }
 
@@ -393,9 +393,9 @@ public :
     tailIndexAndC = localTailIndexAndC.l;
     tailIndexMod = mod&(localC - 1);
 
-    int d2 = d1 + reservedDequeueCounter;
-    minSize = std::min(minSize, d1);
-    maxSize = std::max(maxSize, d2); 
+    int occ2 = occ1 + reservedDequeueCounter;
+    minOcc = std::min(minOcc, occ1);
+    maxOcc = std::max(maxOcc, occ2); 
   }
 
   bool reserveDequeue(PackedIndex *ret) {
@@ -474,7 +474,7 @@ private :
     volatile long tailIndexAndC;
   } __attribute__((aligned (64)));
   int tailIndexMod __attribute__((aligned (64)));
-  int minSize, maxSize;
+  int minOcc, maxOcc;
 };
 
 /**
@@ -488,14 +488,14 @@ public :
     presence((volatile int * const)alignedCalloc<int>(N)),
     headIndex(0), tailIndex(0),
     tailIndexMod(0), c(log2(std::min(std::max(DEFAULT_SIZE, minC), maxC))),
-    minSize(SHRT_MAX), maxSize(0), reservedEnqueueCounter(0), headIndexMod(0) {
+    minOcc(SHRT_MAX), maxOcc(0), reservedEnqueueCounter(0), headIndexMod(0) {
   }
 
   QED_USING_BASE_QED_MEMBERS
 
   bool reserveEnqueue(PackedIndex *ret) {
     PackedIndexAndC oldPacked, newPacked; 
-    int h, t, mod, d2;
+    int h, t, mod, occ2;
 
     do {
       h = headIndex;
@@ -507,14 +507,14 @@ public :
 
       newPacked.l = oldPacked.l;
 
-      d2 = t - h;
-      if (d2 >= localC || presence[mod]) {
+      occ2 = t - h;
+      if (occ2 >= localC || presence[mod]) {
         traceFull();
         return false;
       }
 
       if (mod >= localC) {
-        if (shouldExpand(d2, localC, minSize, maxSize)) {
+        if (shouldExpand(occ2, localC, minOcc, maxOcc)) {
           newPacked.c = oldPacked.c + 1;
           traceResizing(localC << 1);
         }
@@ -524,15 +524,15 @@ public :
         }
         else {
           mod = 0;
-          maxSize = 0;
+          maxOcc = 0;
         }
-        minSize = SHRT_MAX;
+        minOcc = SHRT_MAX;
       }
-      else if (shouldShrink(mod, d2, minSize, maxSize) && !presence[0]) {
+      else if (shouldShrink(mod, occ2, minOcc, maxOcc) && !presence[0]) {
         newPacked.c = log2(mod);
         mod = 0;
-        minSize = SHRT_MAX;
-        maxSize = 0;
+        minOcc = SHRT_MAX;
+        maxOcc = 0;
         traceResizing(1 << newPacked.c);
       }
 
@@ -541,9 +541,9 @@ public :
     } while (!__sync_bool_compare_and_swap(
       &packedTailIndexAndC, oldPacked.l, newPacked.l));
 
-    int d1 = d2 - reservedEnqueueCounter;
-    minSize = std::min<volatile int>(minSize, d1);
-    maxSize = std::max<volatile int>(maxSize, d2);
+    int occ1 = occ2 - reservedEnqueueCounter;
+    minOcc = std::min<volatile int>(minOcc, occ1);
+    maxOcc = std::max<volatile int>(maxOcc, occ2);
 
     ret->logical = t;
     ret->physical = mod;
@@ -623,7 +623,7 @@ private :
     };
     volatile long packedTailIndexAndC;
   } __attribute__((aligned (64)));
-  volatile int minSize, maxSize;
+  volatile int minOcc, maxOcc;
   volatile int reservedEnqueueCounter;
   int headIndexMod __attribute__((aligned (64)));
 };
@@ -641,7 +641,7 @@ public :
     presence((volatile int * const)alignedCalloc<int>(BaseQ<T>::N)),
     headIndex(0), tailIndex(0),
     tailIndexBase(0), c(std::min(std::max(DEFAULT_SIZE, minC), maxC)),
-    minSize(SHRT_MAX), maxSize(0), reservedEnqueueCounter(0),
+    minOcc(SHRT_MAX), maxOcc(0), reservedEnqueueCounter(0),
     headIndexMod(0) {
 #ifdef QED_USE_SPIN_LOCK
     pthread_spin_init(&lock_, PTHREAD_PROCESS_PRIVATE);
@@ -679,10 +679,10 @@ public :
 
     tailIndex = std::max<unsigned int>(seqId, tailIndex);
     int mod = tailIndex - base;
-    int d2 = tailIndex - h;
+    int occ2 = tailIndex - h;
 
     if (mod >= localC) {
-      if (shouldExpand(d2, localC, minSize, maxSize)) {
+      if (shouldExpand(occ2, localC, minOcc, maxOcc)) {
         localC <<= 1;
         traceResizing(localC);
       }
@@ -693,25 +693,25 @@ public :
       }
       else {
         base += localC;
-        maxSize = 0;
+        maxOcc = 0;
       }
-      minSize = SHRT_MAX;
+      minOcc = SHRT_MAX;
     }
     // If it's almost empty.
-    else if (shouldShrink(mod, d2, minSize, maxSize) && !presence[0]) {
+    else if (shouldShrink(mod, occ2, minOcc, maxOcc) && !presence[0]) {
       localC = mod;
       base += mod;
-      minSize = SHRT_MAX;
-      maxSize = 0;
+      minOcc = SHRT_MAX;
+      maxOcc = 0;
       traceResizing(localC);
     }
 
     c = localC;
     tailIndexBase = base;
 
-    int d1 = d2 - reservedEnqueueCounter;
-    minSize = std::min<volatile int>(minSize, d1);
-    maxSize = std::max<volatile int>(maxSize, d2);
+    int occ1 = occ2 - reservedEnqueueCounter;
+    minOcc = std::min<volatile int>(minOcc, occ1);
+    maxOcc = std::max<volatile int>(maxOcc, occ2);
 
     unlock();
 
@@ -800,7 +800,7 @@ private :
   volatile int tailIndex __attribute__((aligned (64)));
   volatile int tailIndexBase;
   volatile int c;
-  volatile int minSize, maxSize;
+  volatile int minOcc, maxOcc;
   volatile int reservedEnqueueCounter;
   int headIndexMod __attribute__((aligned (64)));
 };
@@ -818,7 +818,7 @@ public :
     reservedDequeueCounter(0),
     tailIndex(0), tailIndexMod(0),
     c(log2(std::min(std::max(DEFAULT_SIZE, minC), maxC))),
-    minSize(SHRT_MAX), maxSize(0), 
+    minOcc(SHRT_MAX), maxOcc(0), 
     reservedEnqueueCounter(0) {
   }
 
@@ -851,7 +851,7 @@ public :
       if (mod >= localC) {
         assert(mod < 2*localC);
 
-        if (shouldExpand(t - h, localC, minSize, maxSize)) {
+        if (shouldExpand(t - h, localC, minOcc, maxOcc)) {
           newPacked.c = oldPacked.c + 1;
           traceResizing(localC << 1);
         }
@@ -861,15 +861,15 @@ public :
         }
         else {
           mod = 0;
-          maxSize = 0;
+          maxOcc = 0;
         }
-        minSize = SHRT_MAX;
+        minOcc = SHRT_MAX;
       }
-      else if (shouldShrink(mod, t - h, minSize, maxSize) && !presence[0]) {
+      else if (shouldShrink(mod, t - h, minOcc, maxOcc) && !presence[0]) {
         newPacked.c = log2(mod);
         mod = 0;
-        minSize = SHRT_MAX;
-        maxSize = 0;
+        minOcc = SHRT_MAX;
+        maxOcc = 0;
         traceResizing(1 << newPacked.c);
       }
 
@@ -878,10 +878,10 @@ public :
     } while (!__sync_bool_compare_and_swap(
       &packedTailIndexAndC, oldPacked.l, newPacked.l));
 
-    int d1 = t - h - reservedEnqueueCounter;
-    int d2 = t - h + reservedDequeueCounter;
-    minSize = std::min<volatile int>(minSize, d1);
-    maxSize = std::max<volatile int>(maxSize, d2);
+    int occ1 = t - h - reservedEnqueueCounter;
+    int occ2 = t - h + reservedDequeueCounter;
+    minOcc = std::min<volatile int>(minOcc, occ1);
+    maxOcc = std::max<volatile int>(maxOcc, occ2);
 
     ret->logical = t;
     ret->physical = mod;
@@ -983,7 +983,7 @@ private :
     };
     volatile long packedTailIndexAndC;
   } __attribute__((aligned (64)));
-  volatile int minSize, maxSize;
+  volatile int minOcc, maxOcc;
   volatile int reservedEnqueueCounter;
 };
 
