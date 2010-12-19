@@ -68,6 +68,7 @@ enum EventId {
   FULL,
   EMPTY,
   START,
+  SET_CAPACITY2,
 };
 
 /**
@@ -151,6 +152,10 @@ public :
     trace(SET_CAPACITY, newCapacity);
   }
 
+  void traceResizing2(size_t newCapacity) {
+    trace(SET_CAPACITY2, newCapacity);
+  }
+
   void dump(std::ostream& out) __attribute__((noinline)) {
     if (traceIndex >= TRACE_LENGTH) {
       for (int i = traceIndex - TRACE_LENGTH; i < traceIndex; i++) {
@@ -199,6 +204,9 @@ public :
       case START :
         out << "start";
         break;
+      case SET_CAPACITY2 :
+        out << "setCapacity2";
+        break;
       }
       
       out << " " << t->value << std::endl;
@@ -208,6 +216,8 @@ public :
   void traceStart() { }
 
   void traceResizing(size_t newCapacity) { }
+
+  void traceResizing2(size_t newCapacity) { }
 
   void trace(const char *fmt, ...) { }
 
