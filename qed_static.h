@@ -1,7 +1,7 @@
 /**
  * qed_static.h
  *
- * A concurrent lock-free circular array based queue.
+ * A concurrent non-blocking circular array based queue.
  * Included in qed as a baseline.
  *
  *  Created on: May 10, 2010
@@ -53,7 +53,7 @@
 namespace qed {
 
 /**
- * The base class of lock-free circular array based queue.
+ * The base class of non-blocking circular array based queue.
  */
 template<class T>
 class BaseStaticQ : public BaseQ<T> {
@@ -113,101 +113,6 @@ protected :
   }
 
 /**
- * A single-producer single-consumer (SPSC) array-based statically-sized
- * lock-free queue.
- */
-template<class T>
-class SpscStaticQ : public BaseStaticQ<T> {
-public :
-  SpscStaticQ(size_t N) :
-    BaseStaticQ<T>(N), localHeadIndex(0), localTailIndex(0) { }
-
-  QED_USING_BASE_STATICQ_MEMBERS
-
-  /**
-   * @param t points to reserved logical index,
-   *          which is essentially a sequence number.
-   *
-   * @return true if reservation is successful.
-   */
-  bool reserveEnqueue(int *t) {
-    if (isFull()) {
-      return false;
-    }
-    else {
-      *t = tailIndex;
-      traceReserveEnqueue(*t&(N - 1));
-      return true;
-    }
-  }
-
-  /**
-   * @param t a dummy argument to make the interface consistent
-   */
-  void commitEnqueue(int t = 0) {
-    traceCommitEnqueue(tailIndex&(N - 1));
-    tailIndex++;
-  }
-
-  /**
-   * @param h points to reserved logical index,
-   *          which is essentially a sequence number.
-   *
-   * @return true if reservation is successful.
-   */
-  bool reserveDequeue(int *h) {
-    if (isEmpty()) {
-      return false;
-    }
-    else {
-      *h = headIndex;
-      traceReserveDequeue(*h&(N - 1));
-      return true;
-    }
-  }
-
-  /**
-   * @param h a dummy argument to make the interface consistent
-   */
-  void commitDequeue(int h = 0) {
-    traceCommitDequeue(headIndex&(N - 1));
-    headIndex++;
-  }
-
-  bool isEmpty() {
-    if (localTailIndex == headIndex) {
-      localTailIndex = tailIndex;
-      bool ret = localTailIndex == headIndex;
-      traceEmpty(ret);
-      return ret;
-    }
-#if QED_TRACE_LEVEL >= 2
-    isSpinningEmpty = false;
-#endif
-    return false;
-  }
-
-  bool isFull() {
-    if (tailIndex - localHeadIndex >= (int)N) {
-      localHeadIndex = headIndex;
-      bool ret = tailIndex - localHeadIndex >= (int)N;
-      traceFull(ret);
-      return ret;
-    }
-#if QED_TRACE_LEVEL >= 2
-    isSpinningFull = false;
-#endif
-    return false;
-  }
-
-private :
-  int localHeadIndex __attribute__((aligned (64))), localTailIndex;
-    // cached head/tail indices
-    // localHeadIndex is cached in the producer and refreshed only when
-    // the queue is determined as full.
-};
-
-/**
  * A convenient mid-level class for non-SPSC queues
  *
  * Non-SPSC queues require presence vector since commitEnqueue and/or
@@ -255,6 +160,69 @@ protected :
   using NonSpscStaticQ<T>::isFull; \
   using NonSpscStaticQ<T>::isEmpty; \
   using NonSpscStaticQ<T>::presence;
+
+/**
+ * Multi-producer multi-consumer (MPMC) array-based statically-sized
+ * non-blocking queue
+ */
+template<class T>
+class StaticQ : public NonSpscStaticQ<T> {
+public :
+  StaticQ(size_t N) : NonSpscStaticQ<T>(N) {
+  }
+
+  QED_USING_NON_SPSC_STATICQ_MEMBERS
+
+  /**
+   * @param t points to reserved logical index,
+   *          which is essentially a sequence number.
+   *
+   * @return true if reservation is successful.
+   */
+  bool reserveEnqueue(int *t) {
+    do {
+      *t = tailIndex;
+      if (isFull(*t)) {
+        return false;
+      }
+    } while (!__sync_bool_compare_and_swap(&tailIndex, *t, *t + 1));
+
+    traceReserveEnqueue(*t&(N - 1));
+    return true;
+  }
+
+  /**
+   * @param t the reserved logical index
+   */
+  void commitEnqueue(int t) {
+    presence[t&(N - 1)] = 1;
+    traceCommitEnqueue(t&(N - 1));
+  }
+
+  /**
+   * @param h points to reserved logical index,
+   *          which is essentially a sequence number.
+   */
+  bool reserveDequeue(int *h) {
+    do {
+      *h = headIndex;
+      if (isEmpty(*h)) {
+        return false;
+      }
+    } while (!__sync_bool_compare_and_swap(&headIndex, *h, *h + 1));
+
+    traceReserveDequeue(*h&(N - 1));
+    return true;
+  }
+
+  /**
+   * @param h the reserved logical index
+   */
+  void commitDequeue(int h) {
+    presence[h&(N - 1)] = 0;
+    traceCommitDequeue(h&(N - 1));
+  }
+};
 
 /**
  * SPMC queue.
@@ -309,7 +277,7 @@ public :
 };
 
 /**
- * Unordered MPSC queue.
+ * MPSC queue.
  */
 template<class T>
 class ScStaticQ : public NonSpscStaticQ<T> {
@@ -444,15 +412,15 @@ protected :
 };
 
 /**
- * Unordered MPMC queue
+ * SPSC queue.
  */
 template<class T>
-class StaticQ : public NonSpscStaticQ<T> {
+class SpscStaticQ : public BaseStaticQ<T> {
 public :
-  StaticQ(size_t N) : NonSpscStaticQ<T>(N) {
-  }
+  SpscStaticQ(size_t N) :
+    BaseStaticQ<T>(N), localHeadIndex(0), localTailIndex(0) { }
 
-  QED_USING_NON_SPSC_STATICQ_MEMBERS
+  QED_USING_BASE_STATICQ_MEMBERS
 
   /**
    * @param t points to reserved logical index,
@@ -461,48 +429,80 @@ public :
    * @return true if reservation is successful.
    */
   bool reserveEnqueue(int *t) {
-    do {
+    if (isFull()) {
+      return false;
+    }
+    else {
       *t = tailIndex;
-      if (isFull(*t)) {
-        return false;
-      }
-    } while (!__sync_bool_compare_and_swap(&tailIndex, *t, *t + 1));
-
-    traceReserveEnqueue(*t&(N - 1));
-    return true;
+      traceReserveEnqueue(*t&(N - 1));
+      return true;
+    }
   }
 
   /**
-   * @param t the reserved logical index
+   * @param t a dummy argument to make the interface consistent
    */
-  void commitEnqueue(int t) {
-    presence[t&(N - 1)] = 1;
-    traceCommitEnqueue(t&(N - 1));
+  void commitEnqueue(int t = 0) {
+    traceCommitEnqueue(tailIndex&(N - 1));
+    tailIndex++;
   }
 
   /**
    * @param h points to reserved logical index,
    *          which is essentially a sequence number.
+   *
+   * @return true if reservation is successful.
    */
   bool reserveDequeue(int *h) {
-    do {
+    if (isEmpty()) {
+      return false;
+    }
+    else {
       *h = headIndex;
-      if (isEmpty(*h)) {
-        return false;
-      }
-    } while (!__sync_bool_compare_and_swap(&headIndex, *h, *h + 1));
-
-    traceReserveDequeue(*h&(N - 1));
-    return true;
+      traceReserveDequeue(*h&(N - 1));
+      return true;
+    }
   }
 
   /**
-   * @param h the reserved logical index
+   * @param h a dummy argument to make the interface consistent
    */
-  void commitDequeue(int h) {
-    presence[h&(N - 1)] = 0;
-    traceCommitDequeue(h&(N - 1));
+  void commitDequeue(int h = 0) {
+    traceCommitDequeue(headIndex&(N - 1));
+    headIndex++;
   }
+
+  bool isEmpty() {
+    if (localTailIndex == headIndex) {
+      localTailIndex = tailIndex;
+      bool ret = localTailIndex == headIndex;
+      traceEmpty(ret);
+      return ret;
+    }
+#if QED_TRACE_LEVEL >= 2
+    isSpinningEmpty = false;
+#endif
+    return false;
+  }
+
+  bool isFull() {
+    if (tailIndex - localHeadIndex >= (int)N) {
+      localHeadIndex = headIndex;
+      bool ret = tailIndex - localHeadIndex >= (int)N;
+      traceFull(ret);
+      return ret;
+    }
+#if QED_TRACE_LEVEL >= 2
+    isSpinningFull = false;
+#endif
+    return false;
+  }
+
+private :
+  int localHeadIndex __attribute__((aligned (64))), localTailIndex;
+    // cached head/tail indices
+    // localHeadIndex is cached in the producer and refreshed only when
+    // the queue is determined as full.
 };
 
 // TODO: ordered MPMC queue
