@@ -57,7 +57,7 @@
 namespace qed {
 
 static const int MAX_QLEN = 1 << 16;
-static const int DEFAULT_SIZE = 32;
+static const int DEFAULT_SIZE = 128;
 
 /*
  * A union to atomically update logical and physical indices.
@@ -115,7 +115,7 @@ protected :
    * @param minOcc min occupancy during the last epoch
    */
   bool shouldExpand(int occ, int c, int minOcc, int maxOcc) {
-    return occ > 1 && maxOcc - minOcc >= (c >> 1) + (c >> 2) && c < N;
+    return occ > 1 && maxOcc - minOcc >= (c >> 1) + (c >> 2) && c < (int)BaseQ<T>::N;
   }
 
   /**
@@ -124,7 +124,11 @@ protected :
    * @param maxOcc max occpancy during the last epoch
    */
   bool shouldShrink(int mod, int occ, int minOcc, int maxOcc) {
-    return is2ToN(mod) && occ < mod && maxOcc - minOcc < mod >> 2 && mod >= minC; 
+    return is2ToN(mod) && occ < mod && maxOcc - minOcc < mod >> 1 && mod >= minC; 
+  }
+
+  bool shouldShrink2(int occ, int c, int minOcc, int maxOcc) {
+    return maxOcc - minOcc < c >> 4 && occ < c && c > minC;
   }
 
   const int minC;
@@ -145,8 +149,10 @@ protected :
 #define QED_USING_BASE_QED_MEMBERS \
   QED_USING_BASEQ_MEMBERS \
   using BaseQ<T>::traceResizing; \
+  using BaseQ<T>::traceResizing2; \
   using BaseQed<T>::shouldExpand; \
   using BaseQed<T>::shouldShrink; \
+  using BaseQed<T>::shouldShrink2; \
   using BaseQed<T>::minC; \
   bool reserveEnqueue(int *t) { \
     PackedIndex temp; \
@@ -208,7 +214,7 @@ protected :
 template<class T>
 class SpscQed : public BaseQed<T> {
 public :
-  SpscQed(int minC = 64, int maxC = MAX_QLEN) :
+  SpscQed(int minC = 4, int maxC = MAX_QLEN) :
     BaseQed<T>(minC, maxC), headIndex(0), tailIndex(0),
     c(std::min(std::max(DEFAULT_SIZE, minC), maxC)),
     tailIndexMod(0), headIndexMod(0),
@@ -242,8 +248,8 @@ public :
     int occ = tailIndex - headIndex + 1;
     int mod = tailIndexMod + 1;
 
-    if (mod >= localC) {
-      if (shouldExpand(occ, localC, minOcc, maxOcc)) {
+    if (__builtin_expect(mod >= localC, 0)) {
+      if (__builtin_expect(shouldExpand(occ, localC, minOcc, maxOcc), false)) {
         localC <<= 1;
         traceResizing(localC);
       }
@@ -252,7 +258,7 @@ public :
       }
       minOcc = SHRT_MAX;
     }
-    else if (shouldShrink(mod, occ, minOcc, maxOcc)) {
+    else if (__builtin_expect(shouldShrink(mod, occ, minOcc, maxOcc), false)) {
       localC = tailIndexMod + 1;
       minOcc = SHRT_MAX;
       maxOcc = 0;
@@ -334,7 +340,7 @@ private :
 template<class T>
 class SpQed : public BaseQed<T> {
 public :
-  SpQed(int minC = 64, const int maxC = MAX_QLEN) :
+  SpQed(int minC = 4, const int maxC = MAX_QLEN) :
     BaseQed<T>(minC, maxC),
     presence((volatile int * const)alignedCalloc<int>(N)),
     headIndex(0), headIndexMod(0),
@@ -367,8 +373,8 @@ public :
 
     int mod = tailIndexMod + 1;
     int localC = c;
-    if (mod >= localC) {
-      if (shouldExpand(occ1, localC, minOcc, maxOcc)) {
+    if (__builtin_expect(mod >= localC, 0)) {
+      if (__builtin_expect(shouldExpand(occ1, localC, minOcc, maxOcc), false)) {
         localC <<= 1;
         traceResizing(localC);
       }
@@ -377,7 +383,7 @@ public :
       }
       minOcc = SHRT_MAX;
     }
-    else if (shouldShrink(mod, occ1, minOcc, maxOcc)) {
+    else if (__builtin_expect(shouldShrink(mod, occ1, minOcc, maxOcc), false)) {
       localC = mod;
       minOcc = SHRT_MAX;
       maxOcc = 0;
@@ -483,7 +489,7 @@ private :
 template<class T>
 class ScQed : public BaseQed<T> {
 public :
-  ScQed(int minC = 64, const int maxC = MAX_QLEN) :
+  ScQed(int minC = 4, const int maxC = MAX_QLEN) :
     BaseQed<T>(minC, maxC),
     presence((volatile int * const)alignedCalloc<int>(N)),
     headIndex(0), tailIndex(0),
@@ -497,7 +503,9 @@ public :
     PackedIndexAndC oldPacked, newPacked; 
     int h, t, mod, occ2;
 
+    //bool shrink2;
     do {
+      //shrink2 = false;
       h = headIndex;
       oldPacked.l = packedTailIndexAndC;
 
@@ -513,27 +521,28 @@ public :
         return false;
       }
 
-      if (mod >= localC) {
-        if (shouldExpand(occ2, localC, minOcc, maxOcc)) {
+      if (__builtin_expect(mod >= localC, 0)) {
+        if (__builtin_expect(
+            shouldExpand(occ2, localC, minOcc, maxOcc), false)) {
           newPacked.c = oldPacked.c + 1;
-          traceResizing(localC << 1);
         }
         else if (presence[0]) {
           traceFull();
           return false;
         }
+        //else if (shouldShrink2(occ2, localC, minOcc, maxOcc)) {
+          //newPacked.c = oldPacked.c - 1;
+          //mod = 0;
+          //shrink2 = true;
+        //}
         else {
           mod = 0;
-          maxOcc = 0;
         }
-        minOcc = SHRT_MAX;
       }
-      else if (shouldShrink(mod, occ2, minOcc, maxOcc) && !presence[0]) {
+      else if (__builtin_expect(
+          shouldShrink(mod, occ2, minOcc, maxOcc) && !presence[0], false)) {
         newPacked.c = log2(mod);
         mod = 0;
-        minOcc = SHRT_MAX;
-        maxOcc = 0;
-        traceResizing(1 << newPacked.c);
       }
 
       newPacked.logical= t + 1;
@@ -542,13 +551,33 @@ public :
       &packedTailIndexAndC, oldPacked.l, newPacked.l));
 
     int occ1 = occ2 - reservedEnqueueCounter;
-    minOcc = std::min<volatile int>(minOcc, occ1);
-    maxOcc = std::max<volatile int>(maxOcc, occ2);
+    if (__builtin_expect(mod == 0, 0)) {
+      minOcc = occ1;
+      maxOcc = occ2;
+    }
+    else if (__builtin_expect(newPacked.c > oldPacked.c, 0)) {
+      minOcc = occ1;
+      maxOcc = std::max<volatile int>(maxOcc, occ2);
+    }
+    else {
+      minOcc = std::min<volatile int>(minOcc, occ1);
+      maxOcc = std::max<volatile int>(maxOcc, occ2);
+    }
 
     ret->logical = t;
     ret->physical = mod;
     __sync_fetch_and_add(&reservedEnqueueCounter, 1);
 
+#if QED_TRACE_LEVEL > 0
+    if (newPacked.c != oldPacked.c) {
+      //if (shrink2) {
+        //traceResizing2(1 << newPacked.c);
+      //}
+      //else {
+        traceResizing(1 << newPacked.c);
+      //}
+    }
+#endif
 #if QED_TRACE_LEVEL >= 2
     isSpinningFull = false;
 #endif
@@ -636,7 +665,7 @@ private :
 template<class T>
 class OrderedScQed : public BaseQed<T> {
 public :
-  OrderedScQed(int minC = 64, const int maxC = MAX_QLEN) :
+  OrderedScQed(int minC = 4, const int maxC = MAX_QLEN) :
     BaseQed<T>(minC, maxC),
     presence((volatile int * const)alignedCalloc<int>(BaseQ<T>::N)),
     headIndex(0), tailIndex(0),
@@ -681,12 +710,12 @@ public :
     int mod = tailIndex - base;
     int occ2 = tailIndex - h;
 
-    if (mod >= localC) {
-      if (shouldExpand(occ2, localC, minOcc, maxOcc)) {
+    if (__builtin_expect(mod >= localC, 0)) {
+      if (__builtin_expect(shouldExpand(occ2, localC, minOcc, maxOcc), 0)) {
         localC <<= 1;
         traceResizing(localC);
       }
-      else if (presence[0]) {
+      else if (__builtin_expect(presence[0], 0)) {
         unlock();
         traceFull();
         return false;
@@ -698,7 +727,8 @@ public :
       minOcc = SHRT_MAX;
     }
     // If it's almost empty.
-    else if (shouldShrink(mod, occ2, minOcc, maxOcc) && !presence[0]) {
+    else if (__builtin_expect(
+        shouldShrink(mod, occ2, minOcc, maxOcc) && !presence[0], 0)) {
       localC = mod;
       base += mod;
       minOcc = SHRT_MAX;
@@ -811,7 +841,7 @@ private :
 template<class T>
 class Qed : public BaseQed<T> {
 public :
-  Qed(int minC = 64, const int maxC = MAX_QLEN) :
+  Qed(int minC = 4, const int maxC = MAX_QLEN) :
     BaseQed<T>(minC, maxC),
     presence((volatile int * const)alignedCalloc<int>(N)),
     headIndex(0), headIndexMod(0),
@@ -848,29 +878,24 @@ public :
         return false;
       }
 
-      if (mod >= localC) {
+      if (__builtin_expect(mod >= localC, 0)) {
         assert(mod < 2*localC);
 
-        if (shouldExpand(t - h, localC, minOcc, maxOcc)) {
+        if (__builtin_expect(shouldExpand(t - h, localC, minOcc, maxOcc), 0)) {
           newPacked.c = oldPacked.c + 1;
-          traceResizing(localC << 1);
         }
-        else if (presence[0]) {
+        else if (__builtin_expect(presence[0], 0)) {
           traceFull();
           return false;
         }
         else {
           mod = 0;
-          maxOcc = 0;
         }
-        minOcc = SHRT_MAX;
       }
-      else if (shouldShrink(mod, t - h, minOcc, maxOcc) && !presence[0]) {
+      else if (__builtin_expect(
+          shouldShrink(mod, t - h, minOcc, maxOcc) && !presence[0], 0)) {
         newPacked.c = log2(mod);
         mod = 0;
-        minOcc = SHRT_MAX;
-        maxOcc = 0;
-        traceResizing(1 << newPacked.c);
       }
 
       newPacked.logical = t + 1;
@@ -880,13 +905,28 @@ public :
 
     int occ1 = t - h - reservedEnqueueCounter;
     int occ2 = t - h + reservedDequeueCounter;
-    minOcc = std::min<volatile int>(minOcc, occ1);
-    maxOcc = std::max<volatile int>(maxOcc, occ2);
+    if (__builtin_expect(mod == 0, 0)) {
+      minOcc = occ1;
+      maxOcc = occ2;
+    }
+    else if (__builtin_expect(newPacked.c > oldPacked.c, 0)) {
+      minOcc = occ1;
+      maxOcc = std::max<volatile int>(maxOcc, occ2);
+    }
+    else {
+      minOcc = std::min<volatile int>(minOcc, occ1);
+      maxOcc = std::max<volatile int>(maxOcc, occ2);
+    }
 
     ret->logical = t;
     ret->physical = mod;
     __sync_fetch_and_add(&reservedEnqueueCounter, 1);
 
+#if QED_TRACE_LEVEL > 0
+    if (newPacked.c != oldPacked.c) {
+      traceResizing(1 << newPacked.c);
+    }
+#endif
 #if QED_TRACE_LEVEL >= 2
     isSpinningFull = false;
 #endif
