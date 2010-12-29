@@ -42,7 +42,7 @@ T * const alignedCalloc(size_t n) {
  * The size of buffer that holds traces.
  * When we have more traces than this number, old traces will be overwritten.
  */
-static const int TRACE_LENGTH = 65536*4;
+static const int TRACE_LENGTH = 65536*16;
 
 /**
  * Read TSC (Time Stamp Counter) hardware performance counter
@@ -67,7 +67,6 @@ enum EventId {
   COMMIT_DEQUEUE,
   FULL,
   EMPTY,
-  START,
   SET_CAPACITY2,
 };
 
@@ -87,22 +86,14 @@ static inline bool is2ToN(int i) {
   return ((i - 1)&i) == 0;
 }
 
-/**
- * The class at the very top of our queue class hierarchy.
- */
 template<class T>
-class BaseQ {
+class TraceableQ {
 public :
-
-  /**
-   * @param N capacity of the queue. Must be a power of two
-   */
-  BaseQ(size_t N) : N(N), buf(alignedMalloc<T>(N)) {
-    assert(is2ToN(N)); // N should be a power of two.
+  TraceableQ() {
 #if QED_TRACE_LEVEL > 0
     memset(traces, 0, sizeof(traces));
     traceIndex = 0;
-    traceStart();
+    lastTsc = 0;
 #endif
 #if QED_TRACE_LEVEL >= 2
     isSpinningFull = false;
@@ -110,15 +101,10 @@ public :
 #endif
   }
 
-  /**
-   * @return the pointer to the circular array
-   */
-  T * const getBuf() {
-    return buf;
-  }
+  typedef T tokenType;
 
-  size_t getCapacity() const {
-    return N;
+  size_t getSizeOfToken() {
+    return sizeof(T);
   }
 
   /**
@@ -142,10 +128,6 @@ public :
     t->tsc = readTsc();
     t->id = id;
     t->value = value;
-  }
-
-  void traceStart() {
-    trace(START, 0);
   }
 
   void traceResizing(size_t newCapacity) {
@@ -201,9 +183,6 @@ public :
       case EMPTY :
         out << "empty";
         break;
-      case START :
-        out << "start";
-        break;
       case SET_CAPACITY2 :
         out << "setCapacity2";
         break;
@@ -212,9 +191,34 @@ public :
       out << " " << t->value << std::endl;
     }
   }
-#else
-  void traceStart() { }
 
+  double getCapacityAverage() {
+    double sum = 0;
+    unsigned long long firstTsc = 0;
+    unsigned long long lastTsc = 0;
+    int lastC = -1;
+    for (int i = 0; i < traceIndex; i++) {
+      if (traces[i].id == SET_CAPACITY && traces[i].tsc > lastTsc) {
+        if (lastC >= 0) {
+          sum += (traces[i].tsc - lastTsc)*lastC;
+          //printf("traces[i].tsc = %lld, lastTsc = %lld, lastC = %d, sum = %f\n", traces[i].tsc, lastTsc, lastC, sum);
+        }
+        else {
+          firstTsc = traces[i].tsc;
+        }
+        lastTsc = traces[i].tsc;
+        lastC = traces[i].value;
+      }
+    }
+    if (TraceableQ<T>::lastTsc > lastTsc) {
+      sum += (TraceableQ<T>::lastTsc - lastTsc)*lastC;
+      //printf("TraceableQ<T>::lastTsc = %lld, lastTsc = %lld, lastC = %d, sum = %f\n", TraceableQ<T>::lastTsc, lastTsc, lastC, sum);
+      lastTsc = TraceableQ<T>::lastTsc;
+    }
+    //printf("lastTsc = %lld, firstTsc = %lld\n", lastTsc, firstTsc);
+    return sum/(lastTsc - firstTsc);
+  }
+#else
   void traceResizing(size_t newCapacity) { }
 
   void traceResizing2(size_t newCapacity) { }
@@ -285,27 +289,55 @@ public :
   void traceEmpty(bool isEmpty) { };
 #endif
 
-protected :
-  const size_t N;
-  T * const buf __attribute__((aligned (64)));
-
+protected:
 #if QED_TRACE_LEVEL > 0
   Trace traces[TRACE_LENGTH];
   volatile int traceIndex;
+  volatile unsigned long long lastTsc;
 #endif
 #if QED_TRACE_LEVEL >= 2
   volatile bool isSpinningFull, isSpinningEmpty;
 #endif
 };
 
+/**
+ * The class at the very top of our queue class hierarchy.
+ */
+template<class T>
+class BaseQ : public TraceableQ<T> {
+public :
+
+  /**
+   * @param N capacity of the queue. Must be a power of two
+   */
+  BaseQ(size_t N) : N(N), buf(alignedMalloc<T>(N)) {
+    assert(is2ToN(N)); // N should be a power of two.
+  }
+
+  /**
+   * @return the pointer to the circular array
+   */
+  T * const getBuf() {
+    return buf;
+  }
+
+  size_t getCapacity() const {
+    return N;
+  }
+
+protected :
+  const size_t N;
+  T * const buf __attribute__((aligned (64)));
+};
+
 #define QED_USING_BASEQ_MEMBERS_ \
   using BaseQ<T>::N; \
-  using BaseQ<T>::traceReserveEnqueue; \
-  using BaseQ<T>::traceReserveDequeue; \
-  using BaseQ<T>::traceCommitEnqueue; \
-  using BaseQ<T>::traceCommitDequeue; \
-  using BaseQ<T>::traceFull; \
-  using BaseQ<T>::traceEmpty; \
+  using TraceableQ<T>::traceReserveEnqueue; \
+  using TraceableQ<T>::traceReserveDequeue; \
+  using TraceableQ<T>::traceCommitEnqueue; \
+  using TraceableQ<T>::traceCommitDequeue; \
+  using TraceableQ<T>::traceFull; \
+  using TraceableQ<T>::traceEmpty; \
   int getHeadIndex() const { \
     return headIndex; \
   } \
@@ -319,8 +351,8 @@ protected :
 #if QED_TRACE_LEVEL >= 2
 #define QED_USING_BASEQ_MEMBERS \
   QED_USING_BASEQ_MEMBERS_ \
-  using BaseQ<T>::isSpinningFull; \
-  using BaseQ<T>::isSpinningEmpty;
+  using TraceableQ<T>::isSpinningFull; \
+  using TraceableQ<T>::isSpinningEmpty;
 #else  
 #define QED_USING_BASEQ_MEMBERS QED_USING_BASEQ_MEMBERS_
 #endif
