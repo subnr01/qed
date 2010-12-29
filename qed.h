@@ -57,7 +57,8 @@
 namespace qed {
 
 static const int MAX_QLEN = 1 << 16;
-static const int DEFAULT_SIZE = 128;
+static const int DEFAULT_CAPACITY = 256;
+static const size_t CACHE_CAPACITY = 512*1024;
 
 /*
  * A union to atomically update logical and physical indices.
@@ -106,6 +107,9 @@ template<class T>
 class BaseQed : public BaseQ<T> {
 public :
   BaseQed(size_t minC, size_t maxC) : BaseQ<T>(maxC), minC(minC) {
+#if QED_TRACE_LEVEL > 0
+    firstTrace = true;
+#endif
   }
 
 protected :
@@ -115,7 +119,10 @@ protected :
    * @param minOcc min occupancy during the last epoch
    */
   bool shouldExpand(int occ, int c, int minOcc, int maxOcc) {
-    return occ > 1 && maxOcc - minOcc >= (c >> 1) + (c >> 2) && c < (int)BaseQ<T>::N;
+    return
+      ((maxOcc >= c - 1 && sizeof(T)*(c << 1) <= CACHE_CAPACITY) ||
+        (maxOcc - minOcc > c >> 1)) &&
+      occ > 1 && c < (int)BaseQ<T>::N;
   }
 
   /**
@@ -124,7 +131,9 @@ protected :
    * @param maxOcc max occpancy during the last epoch
    */
   bool shouldShrink(int mod, int occ, int minOcc, int maxOcc) {
-    return is2ToN(mod) && occ < mod && maxOcc - minOcc < mod >> 1 && mod >= minC; 
+    return
+      is2ToN(mod) && occ < mod && maxOcc - minOcc < mod >> 1 && mod >= minC
+      && !(maxOcc >= mod - 1 && sizeof(T)*mod < CACHE_CAPACITY);
   }
 
   bool shouldShrink2(int occ, int c, int minOcc, int maxOcc) {
@@ -132,6 +141,9 @@ protected :
   }
 
   const int minC;
+#if QED_TRACE_LEVEL > 0
+  volatile bool firstTrace;
+#endif
 };
 
 /*
@@ -146,10 +158,10 @@ protected :
  * be called at the compile time, but, unfortunately, the current compiler
  * (at least g++) doesn't do that.
  */
-#define QED_USING_BASE_QED_MEMBERS \
+#define QED_USING_BASE_QED_MEMBERS_ \
   QED_USING_BASEQ_MEMBERS \
-  using BaseQ<T>::traceResizing; \
-  using BaseQ<T>::traceResizing2; \
+  using TraceableQ<T>::traceResizing; \
+  using TraceableQ<T>::traceResizing2; \
   using BaseQed<T>::shouldExpand; \
   using BaseQed<T>::shouldShrink; \
   using BaseQed<T>::shouldShrink2; \
@@ -203,10 +215,25 @@ protected :
   } \
   void commitDequeue(const PackedIndex& h) { \
     commitDequeue(h.physical); \
-  } \
-  size_t getCapacity() const { \
-    return c; \
   }
+
+#if QED_TRACE_LEVEL > 0
+#define QED_USING_BASE_QED_MEMBERS \
+  QED_USING_BASE_QED_MEMBERS_ \
+  void traceReserveEnqueue(int tail) { \
+    if (BaseQed<T>::firstTrace) { \
+      traceResizing(getCapacity()); \
+      BaseQed<T>::firstTrace = false; \
+    } \
+    BaseQ<T>::traceReserveEnqueue(tail); \
+  } \
+  void traceCommitDequeue(int head) { \
+    TraceableQ<T>::lastTsc = readTsc(); \
+    BaseQ<T>::traceCommitDequeue(head); \
+  }
+#else
+#define QED_USING_BASE_QED_MEMBERS QED_USING_BASE_QED_MEMBERS_
+#endif
 
 /**
  * Multi-producer multi-consumer (MPMC) Qed
@@ -220,7 +247,7 @@ public :
     headIndex(0), headIndexMod(0),
     reservedDequeueCounter(0),
     tailIndex(0), tailIndexMod(0),
-    c(log2(std::min(std::max(DEFAULT_SIZE, minC), maxC))),
+    c(log2(std::min(std::max(DEFAULT_CAPACITY, minC), maxC))),
     minOcc(SHRT_MAX), maxOcc(0), 
     reservedEnqueueCounter(0) {
   }
@@ -378,6 +405,10 @@ public :
     return presence[t] || tailIndex - headIndex >= (1 << c);
   }
 
+  size_t getCapacity() const {
+    return 1 << c;
+  }
+
 private :
   volatile int * const presence __attribute__((aligned (64)));
   union {
@@ -411,7 +442,7 @@ public :
     presence((volatile int * const)alignedCalloc<int>(N)),
     headIndex(0), headIndexMod(0),
     reservedDequeueCounter(0),
-    tailIndex(0), c(std::min(std::max(DEFAULT_SIZE, minC), maxC)),
+    tailIndex(0), c(std::min(std::max(DEFAULT_CAPACITY, minC), maxC)),
     tailIndexMod(0),
     minOcc(SHRT_MAX), maxOcc(0) {
   }
@@ -528,6 +559,10 @@ public :
     return ret;
   }
 
+  size_t getCapacity() const {
+    return c;
+  }
+
 private :
   volatile int * const presence __attribute__((aligned (64)));
   union {
@@ -559,7 +594,7 @@ public :
     BaseQed<T>(minC, maxC),
     presence((volatile int * const)alignedCalloc<int>(N)),
     headIndex(0), tailIndex(0),
-    tailIndexMod(0), c(log2(std::min(std::max(DEFAULT_SIZE, minC), maxC))),
+    tailIndexMod(0), c(log2(std::min(std::max(DEFAULT_CAPACITY, minC), maxC))),
     minOcc(SHRT_MAX), maxOcc(0), reservedEnqueueCounter(0), headIndexMod(0) {
   }
 
@@ -707,6 +742,10 @@ public :
     return presence[seqId] || seqId - headIndex >= (1 << c);
   }
 
+  size_t getCapacity() const {
+    return 1 << c;
+  }
+
 private :
   volatile int * const presence __attribute__((aligned (64)));
   volatile int headIndex __attribute__((aligned (64)));
@@ -735,7 +774,7 @@ public :
     BaseQed<T>(minC, maxC),
     presence((volatile int * const)alignedCalloc<int>(BaseQ<T>::N)),
     headIndex(0), tailIndex(0),
-    tailIndexBase(0), c(std::min(std::max(DEFAULT_SIZE, minC), maxC)),
+    tailIndexBase(0), c(std::min(std::max(DEFAULT_CAPACITY, minC), maxC)),
     minOcc(SHRT_MAX), maxOcc(0), reservedEnqueueCounter(0),
     headIndexMod(0) {
 #ifdef QED_USE_SPIN_LOCK
@@ -869,6 +908,10 @@ public :
     return ret;
   }
 
+  size_t getCapacity() const {
+    return c;
+  }
+
 private :
   void lock() {
 #ifdef QED_USE_SPIN_LOCK
@@ -909,9 +952,9 @@ class SpscQed : public BaseQed<T> {
 public :
   SpscQed(int minC = 4, int maxC = MAX_QLEN) :
     BaseQed<T>(minC, maxC), headIndex(0), tailIndex(0),
-    c(std::min(std::max(DEFAULT_SIZE, minC), maxC)),
+    c(std::min(std::max(DEFAULT_CAPACITY, minC), maxC)),
     tailIndexMod(0), headIndexMod(0),
-    localC(std::min(std::max(DEFAULT_SIZE, minC), maxC)),
+    localC(std::min(std::max(DEFAULT_CAPACITY, minC), maxC)),
     minOcc(SHRT_MAX), maxOcc(0) {
   }
 
@@ -1012,6 +1055,10 @@ public :
     bool ret = tailIndex - headIndex >= localC;
     traceFull(ret);
     return ret;
+  }
+
+  size_t getCapacity() const {
+    return c;
   }
 
 private :
