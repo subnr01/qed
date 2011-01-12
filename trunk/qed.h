@@ -58,7 +58,7 @@ namespace qed {
 
 static const int MAX_QLEN = 1 << 16;
 static const int DEFAULT_CAPACITY = 256;
-static const size_t CACHE_CAPACITY = 512*1024;
+static const size_t CACHE_CAPACITY = 1024*1024;
 
 /*
  * A union to atomically update logical and physical indices.
@@ -278,13 +278,13 @@ public :
         return false;
       }
 
-      if (__builtin_expect(mod >= localC, 0)) {
+      if (mod >= localC) {
         assert(mod < 2*localC);
 
-        if (__builtin_expect(shouldExpand(t - h, localC, minOcc, maxOcc), 0)) {
+        if (shouldExpand(t - h, localC, minOcc, maxOcc)) {
           newPacked.c = oldPacked.c + 1;
         }
-        else if (__builtin_expect(presence[0], 0)) {
+        else if (presence[0]) {
           traceFull();
           return false;
         }
@@ -292,8 +292,7 @@ public :
           mod = 0;
         }
       }
-      else if (__builtin_expect(
-          shouldShrink(mod, t - h, minOcc, maxOcc) && !presence[0], 0)) {
+      else if (shouldShrink(mod, t - h, minOcc, maxOcc) && !presence[0]) {
         newPacked.c = log2(mod);
         mod = 0;
       }
@@ -305,11 +304,11 @@ public :
 
     int occ1 = t - h - reservedEnqueueCounter;
     int occ2 = t - h + reservedDequeueCounter;
-    if (__builtin_expect(mod == 0, 0)) {
+    if (mod == 0) {
       minOcc = occ1;
       maxOcc = occ2;
     }
-    else if (__builtin_expect(newPacked.c > oldPacked.c, 0)) {
+    else if (newPacked.c > oldPacked.c) {
       minOcc = occ1;
       maxOcc = std::max<volatile int>(maxOcc, occ2);
     }
@@ -470,8 +469,8 @@ public :
 
     int mod = tailIndexMod + 1;
     int localC = c;
-    if (__builtin_expect(mod >= localC, 0)) {
-      if (__builtin_expect(shouldExpand(occ1, localC, minOcc, maxOcc), false)) {
+    if (mod >= localC) {
+      if (shouldExpand(occ1, localC, minOcc, maxOcc)) {
         localC <<= 1;
         traceResizing(localC);
       }
@@ -480,7 +479,7 @@ public :
       }
       minOcc = SHRT_MAX;
     }
-    else if (__builtin_expect(shouldShrink(mod, occ1, minOcc, maxOcc), false)) {
+    else if (shouldShrink(mod, occ1, minOcc, maxOcc)) {
       localC = mod;
       minOcc = SHRT_MAX;
       maxOcc = 0;
@@ -622,9 +621,8 @@ public :
         return false;
       }
 
-      if (__builtin_expect(mod >= localC, 0)) {
-        if (__builtin_expect(
-            shouldExpand(occ2, localC, minOcc, maxOcc), false)) {
+      if (mod >= localC) {
+        if (shouldExpand(occ2, localC, minOcc, maxOcc)) {
           newPacked.c = oldPacked.c + 1;
         }
         else if (presence[0]) {
@@ -640,8 +638,7 @@ public :
           mod = 0;
         }
       }
-      else if (__builtin_expect(
-          shouldShrink(mod, occ2, minOcc, maxOcc) && !presence[0], false)) {
+      else if (shouldShrink(mod, occ2, minOcc, maxOcc) && !presence[0]) {
         newPacked.c = log2(mod);
         mod = 0;
       }
@@ -652,11 +649,11 @@ public :
       &packedTailIndexAndC, oldPacked.l, newPacked.l));
 
     int occ1 = occ2 - reservedEnqueueCounter;
-    if (__builtin_expect(mod == 0, 0)) {
+    if (mod == 0) {
       minOcc = occ1;
       maxOcc = occ2;
     }
-    else if (__builtin_expect(newPacked.c > oldPacked.c, 0)) {
+    else if (newPacked.c > oldPacked.c) {
       minOcc = occ1;
       maxOcc = std::max<volatile int>(maxOcc, occ2);
     }
@@ -815,12 +812,12 @@ public :
     int mod = tailIndex - base;
     int occ2 = tailIndex - h;
 
-    if (__builtin_expect(mod >= localC, 0)) {
-      if (__builtin_expect(shouldExpand(occ2, localC, minOcc, maxOcc), 0)) {
+    if (mod >= localC) {
+      if (shouldExpand(occ2, localC, minOcc, maxOcc)) {
         localC <<= 1;
         traceResizing(localC);
       }
-      else if (__builtin_expect(presence[0], 0)) {
+      else if (presence[0]) {
         unlock();
         traceFull();
         return false;
@@ -832,8 +829,7 @@ public :
       minOcc = SHRT_MAX;
     }
     // If it's almost empty.
-    else if (__builtin_expect(
-        shouldShrink(mod, occ2, minOcc, maxOcc) && !presence[0], 0)) {
+    else if (shouldShrink(mod, occ2, minOcc, maxOcc) && !presence[0]) {
       localC = mod;
       base += mod;
       minOcc = SHRT_MAX;
@@ -984,8 +980,8 @@ public :
     int occ = tailIndex - headIndex + 1;
     int mod = tailIndexMod + 1;
 
-    if (__builtin_expect(mod >= localC, 0)) {
-      if (__builtin_expect(shouldExpand(occ, localC, minOcc, maxOcc), false)) {
+    if (mod >= localC) {
+      if (shouldExpand(occ, localC, minOcc, maxOcc)) {
         localC <<= 1;
         traceResizing(localC);
       }
@@ -994,7 +990,7 @@ public :
       }
       minOcc = SHRT_MAX;
     }
-    else if (__builtin_expect(shouldShrink(mod, occ, minOcc, maxOcc), false)) {
+    else if (shouldShrink(mod, occ, minOcc, maxOcc)) {
       localC = tailIndexMod + 1;
       minOcc = SHRT_MAX;
       maxOcc = 0;
