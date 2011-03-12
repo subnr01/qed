@@ -410,24 +410,28 @@ public :
 
 private :
   volatile int * const presence __attribute__((aligned (64)));
-  union {
-    struct {
-      volatile int headIndex;
-      volatile int headIndexMod;
+  struct {
+    union {
+      struct {
+        volatile int headIndex;
+        volatile int headIndexMod;
+      };
+      volatile long packedHeadIndex;
     };
-    volatile long packedHeadIndex;
+    volatile int reservedDequeueCounter;
   } __attribute__((aligned (64)));
-  volatile int reservedDequeueCounter;
-  union {
-    struct {
-      volatile int tailIndex;
-      volatile int tailIndexMod:24;
-      volatile char c;
+  struct {
+    union {
+      struct {
+        volatile int tailIndex;
+        volatile int tailIndexMod:24;
+        volatile char c;
+      };
+      volatile long packedTailIndexAndC;
     };
-    volatile long packedTailIndexAndC;
+    volatile int minOcc, maxOcc;
+    volatile int reservedEnqueueCounter;
   } __attribute__((aligned (64)));
-  volatile int minOcc, maxOcc;
-  volatile int reservedEnqueueCounter;
 };
 
 /**
@@ -564,14 +568,16 @@ public :
 
 private :
   volatile int * const presence __attribute__((aligned (64)));
-  union {
-    struct {
-      volatile int headIndex;
-      volatile int headIndexMod;
+  struct {
+    union {
+      struct {
+        volatile int headIndex;
+        volatile int headIndexMod;
+      };
+      volatile long packedHeadIndex;
     };
-    volatile long packedHeadIndex;
+    volatile int reservedDequeueCounter;
   } __attribute__((aligned (64)));
-  volatile int reservedDequeueCounter;
   union {
     struct {
       volatile int tailIndex;
@@ -579,7 +585,7 @@ private :
     };
     volatile long tailIndexAndC;
   } __attribute__((aligned (64)));
-  int tailIndexMod __attribute__((aligned (64)));
+  int tailIndexMod;
   int minOcc, maxOcc;
 };
 
@@ -746,17 +752,19 @@ public :
 private :
   volatile int * const presence __attribute__((aligned (64)));
   volatile int headIndex __attribute__((aligned (64)));
-  union {
-    struct {
-      volatile int tailIndex;
-      volatile int tailIndexMod:24;
-      volatile char c;
+  int headIndexMod;
+  struct {
+    union {
+      struct {
+        volatile int tailIndex;
+        volatile int tailIndexMod:24;
+        volatile char c;
+      };
+      volatile long packedTailIndexAndC;
     };
-    volatile long packedTailIndexAndC;
+    volatile int minOcc, maxOcc;
+    volatile int reservedEnqueueCounter;
   } __attribute__((aligned (64)));
-  volatile int minOcc, maxOcc;
-  volatile int reservedEnqueueCounter;
-  int headIndexMod __attribute__((aligned (64)));
 };
 
 #define QED_USE_SPIN_LOCK
@@ -932,12 +940,14 @@ private :
 #endif
   volatile int * const presence __attribute__((aligned (64)));
   volatile int headIndex __attribute__((aligned (64)));
-  volatile int tailIndex __attribute__((aligned (64)));
-  volatile int tailIndexBase;
-  volatile int c;
-  volatile int minOcc, maxOcc;
-  volatile int reservedEnqueueCounter;
-  int headIndexMod __attribute__((aligned (64)));
+  int headIndexMod;
+  struct {
+    volatile int tailIndex;
+    volatile int tailIndexBase;
+    volatile int c;
+    volatile int minOcc, maxOcc;
+    volatile int reservedEnqueueCounter;
+  } __attribute__((aligned (64)));
 };
 
 /**
@@ -1059,6 +1069,7 @@ public :
 
 private :
   volatile int headIndex __attribute__((aligned (64)));
+  int headIndexMod;
   union {
     struct {
       volatile int tailIndex;
@@ -1066,7 +1077,7 @@ private :
     };
     volatile long tailIndexAndC;
   } __attribute__((aligned (64)));
-  int tailIndexMod __attribute__((aligned (64))), headIndexMod, localC;
+  int tailIndexMod, localC;
   int minOcc, maxOcc;
 };
 
