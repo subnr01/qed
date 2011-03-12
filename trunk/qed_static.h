@@ -499,7 +499,7 @@ public :
   }
 
 private :
-  int localHeadIndex __attribute__((aligned (64))), localTailIndex;
+  int localHeadIndex, localTailIndex;
     // cached head/tail indices
     // localHeadIndex is cached in the producer and refreshed only when
     // the queue is determined as full.
