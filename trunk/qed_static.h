@@ -183,6 +183,7 @@ public :
     do {
       *t = tailIndex;
       if (isFull(*t)) {
+        waitNotFull();
         return false;
       }
     } while (!__sync_bool_compare_and_swap(&tailIndex, *t, *t + 1));
@@ -196,6 +197,7 @@ public :
    */
   void commitEnqueue(int t) {
     presence[t&(N - 1)] = 1;
+    broadCastNotEmpty();
     traceCommitEnqueue(t&(N - 1));
   }
 
@@ -207,6 +209,7 @@ public :
     do {
       *h = headIndex;
       if (isEmpty(*h)) {
+        waitNotEmpty();
         return false;
       }
     } while (!__sync_bool_compare_and_swap(&headIndex, *h, *h + 1));
@@ -220,6 +223,7 @@ public :
    */
   void commitDequeue(int h) {
     presence[h&(N - 1)] = 0;
+    broadCastNotFull();
     traceCommitDequeue(h&(N - 1));
   }
 };
@@ -237,6 +241,7 @@ public :
 
   bool reserveEnqueue(int *t) {
     if (isFull()) {
+      waitNotFull();
       return false;
     }
     else {
@@ -253,12 +258,14 @@ public :
     presence[tailIndex&(N - 1)] = 1;
     traceCommitEnqueue(tailIndex&(N - 1));
     tailIndex++;
+    broadCastNotEmpty();
   }
 
   bool reserveDequeue(int *h) {
     do {
       *h = headIndex;
       if (isEmpty(*h)) {
+        waitNotEmpty();
         return false;
       }
     } while (!__sync_bool_compare_and_swap(&headIndex, *h, *h + 1));
@@ -272,6 +279,7 @@ public :
    */
   void commitDequeue(int h) {
     presence[h&(N - 1)] = 0;
+    signalNotFull();
     traceCommitDequeue(h&(N - 1));
   }
 };
@@ -291,6 +299,7 @@ public :
     do {
       *t = tailIndex;
       if (isFull(*t)) {
+        waitNotFull();
         return false;
       }
     } while (!__sync_bool_compare_and_swap(&tailIndex, *t, *t + 1));
@@ -304,11 +313,13 @@ public :
    */
   void commitEnqueue(int t) {
     presence[t&(N - 1)] = 1;
+    signalNotEmpty();
     traceCommitEnqueue(t&(N - 1));
   }
 
   bool reserveDequeue(int *h) {
     if (isEmpty()) {
+      waitNotEmpty();
       return false;
     }
     else {
@@ -325,6 +336,7 @@ public :
     presence[headIndex&(N - 1)] = 0;
     traceCommitDequeue(headIndex&(N - 1));
     headIndex++;
+    broadCastNotFull();
   }
 };
 
@@ -350,6 +362,7 @@ public :
    */
   bool reserveEnqueue(const int *t) {
     if (isFull(*t)) {
+      waitNotFull();
       return false;
     }
     else {
@@ -366,11 +379,13 @@ public :
    */
   void commitEnqueue(int t) {
     presence[t&(N - 1)] = 1;
+    signalNotEmpty();
     traceCommitEnqueue(t&(N - 1));
   }
 
   bool reserveDequeue(int *h) {
     if (isEmpty()) {
+      waitNotEmpty();
       return false;
     }
     else {
@@ -387,6 +402,7 @@ public :
     presence[headIndex&(N - 1)] = 0;
     traceCommitDequeue(headIndex&(N - 1));
     headIndex++;
+    broadCastNotFull();
   }
 
   bool isFull(int t) const {
@@ -430,6 +446,7 @@ public :
    */
   bool reserveEnqueue(int *t) {
     if (isFull()) {
+      waitNotFull();
       return false;
     }
     else {
@@ -445,6 +462,7 @@ public :
   void commitEnqueue(int t = 0) {
     traceCommitEnqueue(tailIndex&(N - 1));
     tailIndex++;
+    signalNotEmpty();
   }
 
   /**
@@ -455,6 +473,7 @@ public :
    */
   bool reserveDequeue(int *h) {
     if (isEmpty()) {
+      waitNotEmpty();
       return false;
     }
     else {
@@ -470,6 +489,7 @@ public :
   void commitDequeue(int h = 0) {
     traceCommitDequeue(headIndex&(N - 1));
     headIndex++;
+    signalNotFull();
   }
 
   bool isEmpty() {
