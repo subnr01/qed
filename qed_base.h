@@ -15,6 +15,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <algorithm>
+#include <pthread.h>
+
+//#define QED_USE_CV
 
 namespace qed {
 
@@ -99,7 +103,22 @@ public :
     isSpinningFull = false;
     isSpinningEmpty = false;
 #endif
+#ifdef QED_USE_CV
+    pthread_mutex_init(&empty_lock_, NULL);
+    pthread_mutex_init(&full_lock_, NULL);
+    pthread_cond_init(&not_empty_cv_, NULL);
+    pthread_cond_init(&not_full_cv_, NULL);
+#endif
   }
+
+#ifdef QED_USE_CV
+  virtual ~TraceableQ() {
+    pthread_mutex_destroy(&empty_lock_);
+    pthread_mutex_destroy(&full_lock_);
+    pthread_cond_destroy(&not_empty_cv_);
+    pthread_cond_destroy(&not_full_cv_);
+  }
+#endif
 
   typedef T tokenType;
 
@@ -278,6 +297,133 @@ public :
       isSpinningEmpty = false;
     }
   }
+
+  void writeOccupancies(std::ostream& out) __attribute__((noinline)) {
+    int occ = 0;
+    int lastOcc = -1;
+    for (int i = 0; i < traceIndex; i++) {
+      if (traces[i].id == RESERVE_ENQUEUE) {
+        occ++;
+        if (occ != lastOcc) {
+          out <<
+            (traces[i].tsc - traces[0].tsc)/2.27/1000000000 << ' ' << occ <<
+            std::endl;
+          lastOcc = occ;
+        }
+      }
+      else if (traces[i].id == COMMIT_DEQUEUE) {
+        occ--;
+      }
+    }
+  }
+
+  int writeOptimalCapacities(std::ostream& out) __attribute__((noinline)) {
+    unsigned long long *resEnqTimes = new unsigned long long[TRACE_LENGTH];
+      // timeSeqId -> resEnqTime
+    unsigned long long *comEnqTimes = new unsigned long long[TRACE_LENGTH];
+      // logSeqId -> comEnqTime
+    unsigned long long *resDeqTimes = new unsigned long long[TRACE_LENGTH];
+      // timeSeqId -> resDeqTime
+    unsigned long long *comDeqTimes = new unsigned long long[TRACE_LENGTH];
+      // timeSeqId -> comDeqTime
+
+    // timeSeqId -> logicalSeqId
+    int *enqIds = new int[TRACE_LENGTH];
+    int *deqIds = new int[TRACE_LENGTH];
+
+    // 1. Initialize arrays.
+    int enqCnt = 0, deqCnt = 0, comDeqCnt = 0;
+    for (int i = 0; i < traceIndex; i++) {
+      if (traces[i].id == RESERVE_ENQUEUE) {
+        resEnqTimes[enqCnt] = traces[i].tsc;
+        enqIds[enqCnt] = traces[i].value;
+        enqCnt++;
+      }
+      else if (traces[i].id == COMMIT_ENQUEUE) {
+        comEnqTimes[traces[i].value] = traces[i].tsc;
+      }
+      else if (traces[i].id == RESERVE_DEQUEUE) {
+        resDeqTimes[deqCnt] = traces[i].tsc;
+        deqIds[deqCnt] = traces[i].value;
+        deqCnt++;
+      }
+      else if (traces[i].id == COMMIT_DEQUEUE) {
+        comDeqTimes[comDeqCnt] = traces[i].tsc;
+        comDeqCnt++;
+      }
+    }
+
+    // 2. Compute optimal reserveEnqueue times.
+    int cnt = std::min(enqCnt, deqCnt);
+    unsigned long long *optTimes = new unsigned long long[cnt + 1];
+      // optimal reserveEnqueue times
+    resEnqTimes[cnt] = resEnqTimes[cnt - 1]; // boundary value
+    resDeqTimes[cnt] = resDeqTimes[cnt - 1]; // boundary value
+    optTimes[cnt] = ULLONG_MAX; // boundary value
+    for (int i = cnt - 1; i >= 0; i--) { // Moving backward.
+      int nextEnq = cnt, nextDeq = cnt;
+      for (int j = i; j < cnt && (nextEnq == cnt || nextDeq == cnt); j++) {
+        if (enqIds[j] > enqIds[i] && nextEnq == cnt) {
+          nextEnq = j;
+        }
+        if (deqIds[j] == enqIds[i] && nextDeq == cnt) {
+          nextDeq = j;
+        }
+      }
+
+      optTimes[i] = std::min(
+        optTimes[nextEnq] - (resEnqTimes[nextEnq] - resEnqTimes[i]),
+        resDeqTimes[nextDeq] - (comEnqTimes[enqIds[i]] - resEnqTimes[i]));
+    }
+
+    // 3. Sort optimal reserveEnqueue times.
+    std::sort(optTimes, optTimes + cnt);
+
+    // 4. Compute optimal capacities.
+    int lastOpt = -1;
+    int *hist = new int[65536];
+    for (int i = 0; i < 65536; i++) {
+      hist[i] = 0;
+    }
+    for (int i = 0; i < cnt; i++) {
+      int opt = 1;
+      for (int j = i - 1; j >= 0; j--) {
+        if (comDeqTimes[j] < optTimes[i]) {
+          opt = i - j;
+          break;
+        }
+      }
+      hist[opt]++;
+      if (optTimes[i] >= traces[0].tsc && (opt != lastOpt || i == cnt - 1)) {
+        out <<
+          (optTimes[i] - traces[0].tsc)/2.27/1000000000 << ' ' <<
+          opt << std::endl;
+        lastOpt = opt;
+      }
+    }
+
+    delete[] resEnqTimes;
+    delete[] comEnqTimes;
+    delete[] resDeqTimes;
+    delete[] comDeqTimes;
+    delete[] enqIds;
+    delete[] deqIds;
+    delete[] optTimes;
+
+    int sum = hist[0];
+    int i;
+    for (i = 1; i < 65536; i *= 2) {
+      for (int j = i; j < i*2; j++) {
+        sum += hist[j];
+      }
+      if (sum*10 >= cnt*9) {
+        break;
+      }
+    }
+
+    delete[] hist;
+    return i*2;
+  }
 #else
   void traceReserveEnqueue(int tail) { }
   void traceReserveDequeue(int head) { }
@@ -287,6 +433,53 @@ public :
   void traceEmpty() { };
   void traceFull(bool isFull) { };
   void traceEmpty(bool isEmpty) { };
+  void writeOccupancies(std::ostream& out) { };
+  void writeOptimalCapacities(std::ostream& out) { };
+#endif
+
+#ifdef QED_USE_CV
+  void waitNotEmpty() {
+    pthread_mutex_lock(&empty_lock_);
+    pthread_cond_wait(&not_empty_cv_, &empty_lock_);
+    pthread_mutex_unlock(&empty_lock_);
+  }
+
+  void waitNotFull() {
+    pthread_mutex_lock(&full_lock_);
+    pthread_cond_wait(&not_full_cv_, &full_lock_);
+    pthread_mutex_unlock(&full_lock_);
+  }
+
+  void signalNotEmpty() {
+    pthread_mutex_lock(&empty_lock_);
+    pthread_cond_signal(&not_empty_cv_);
+    pthread_mutex_unlock(&empty_lock_);
+  }
+
+  void signalNotFull() {
+    pthread_mutex_lock(&full_lock_);
+    pthread_cond_signal(&not_full_cv_);
+    pthread_mutex_unlock(&full_lock_);
+  }
+
+  void broadCastNotEmpty() {
+    pthread_mutex_lock(&empty_lock_);
+    pthread_cond_broadcast(&not_empty_cv_);
+    pthread_mutex_unlock(&empty_lock_);
+  }
+
+  void broadCastNotFull() {
+    pthread_mutex_lock(&full_lock_);
+    pthread_cond_broadcast(&not_full_cv_);
+    pthread_mutex_unlock(&full_lock_);
+  }
+#else
+  void waitNotEmpty() { }
+  void waitNotFull() { }
+  void signalNotEmpty() { }
+  void signalNotFull() { }
+  void broadCastNotEmpty() { }
+  void broadCastNotFull() { }
 #endif
 
 protected:
@@ -297,6 +490,10 @@ protected:
 #endif
 #if QED_TRACE_LEVEL >= 2
   volatile bool isSpinningFull, isSpinningEmpty;
+#endif
+#ifdef QED_USE_CV
+  pthread_mutex_t empty_lock_, full_lock_;
+  pthread_cond_t not_empty_cv_, not_full_cv_;
 #endif
 };
 
@@ -338,6 +535,12 @@ protected :
   using TraceableQ<T>::traceCommitDequeue; \
   using TraceableQ<T>::traceFull; \
   using TraceableQ<T>::traceEmpty; \
+  using TraceableQ<T>::waitNotEmpty; \
+  using TraceableQ<T>::waitNotFull; \
+  using TraceableQ<T>::signalNotEmpty; \
+  using TraceableQ<T>::signalNotFull; \
+  using TraceableQ<T>::broadCastNotEmpty; \
+  using TraceableQ<T>::broadCastNotFull; \
   int getHeadIndex() const { \
     return headIndex; \
   } \

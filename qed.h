@@ -58,7 +58,9 @@ namespace qed {
 
 static const int MAX_QLEN = 1 << 16;
 static const int DEFAULT_CAPACITY = 256;
-static const size_t CACHE_CAPACITY = 1024*1024;
+//static const size_t CACHE_CAPACITY = 512*1024; // 8MB L3 cache / 4 hyper-threaded cores / 2
+//static const size_t CACHE_CAPACITY = 64*1024; // 256KB / 1 hyper-threaded core / 2
+static const size_t CACHE_CAPACITY = 16*1024; // 32KB / 1 hyper-threaded core
 
 /*
  * A union to atomically update logical and physical indices.
@@ -120,7 +122,7 @@ protected :
    */
   bool shouldExpand(int occ, int c, int minOcc, int maxOcc) {
     return
-      ((maxOcc >= c - 1 && sizeof(T)*(c << 1) <= CACHE_CAPACITY) ||
+      (//(maxOcc >= c - 1 && c <= (int)(CACHE_CAPACITY/8/sizeof(T))) || // assume there are two queues (input/output) per thread
         (maxOcc - minOcc > c >> 1)) &&
       occ > 1 && c < (int)BaseQ<T>::N;
   }
@@ -132,8 +134,8 @@ protected :
    */
   bool shouldShrink(int mod, int occ, int minOcc, int maxOcc) {
     return
-      is2ToN(mod) && occ < mod && maxOcc - minOcc < mod >> 1 && mod >= minC
-      && !(maxOcc >= mod - 1 && sizeof(T)*mod < CACHE_CAPACITY);
+      is2ToN(mod) && occ < mod && maxOcc - minOcc < mod >> 1 && mod >= minC;
+      //&& !(maxOcc >= mod - 1 && mod < (int)(CACHE_CAPACITY/4/sizeof(T)));
   }
 
   bool shouldShrink2(int occ, int c, int minOcc, int maxOcc) {
@@ -243,13 +245,16 @@ class Qed : public BaseQed<T> {
 public :
   Qed(int minC = 4, const int maxC = MAX_QLEN) :
     BaseQed<T>(minC, maxC),
+    next((volatile int * const)alignedCalloc<int>(N)),
     presence((volatile int * const)alignedCalloc<int>(N)),
-    headIndex(0), headIndexMod(0),
+    headIndex(-1),
     reservedDequeueCounter(0),
-    tailIndex(0), tailIndexMod(0),
+    tailIndex(-1),
     c(log2(std::min(std::max(DEFAULT_CAPACITY, minC), maxC))),
     minOcc(SHRT_MAX), maxOcc(0), 
     reservedEnqueueCounter(0) {
+    tailIndexMod = (1 << c) - 1;
+    headIndexMod = maxC - 1;
   }
 
   QED_USING_BASE_QED_MEMBERS
@@ -268,13 +273,14 @@ public :
       oldPacked.l = packedTailIndexAndC;
 
       t = oldPacked.logical;
-      mod = oldPacked.physical;
+      mod = oldPacked.physical + 1;
       int localC = 1 << oldPacked.c;
 
       newPacked.l = oldPacked.l;
 
       if (t - h >= localC || presence[mod]) {
         traceFull();
+        waitNotFull();
         return false;
       }
 
@@ -286,6 +292,7 @@ public :
         }
         else if (presence[0]) {
           traceFull();
+          waitNotFull();
           return false;
         }
         else {
@@ -298,7 +305,7 @@ public :
       }
 
       newPacked.logical = t + 1;
-      newPacked.physical = mod + 1;
+      newPacked.physical = mod;
     } while (!__sync_bool_compare_and_swap(
       &packedTailIndexAndC, oldPacked.l, newPacked.l));
 
@@ -317,8 +324,9 @@ public :
       maxOcc = std::max<volatile int>(maxOcc, occ2);
     }
 
-    ret->logical = t;
+    ret->logical = t + 1;
     ret->physical = mod;
+    next[oldPacked.physical] = mod;
     __sync_fetch_and_add(&reservedEnqueueCounter, 1);
 
 #if QED_TRACE_LEVEL > 0
@@ -341,6 +349,7 @@ public :
     assert(t < (1 << c));
     assert(!presence[t]);
     presence[t] = 1;
+    broadCastNotEmpty();
     __sync_fetch_and_add(&reservedEnqueueCounter, -1);
     traceCommitEnqueue(t);
   }
@@ -349,31 +358,24 @@ public :
    * @param ret points to reserved index
    */
   bool reserveDequeue(PackedIndex *ret) {
-    PackedIndex next;
-    int mod;
+    PackedIndex oldPacked;
     do {
-      PackedIndexAndC packed;
-      packed.l = packedTailIndexAndC;
-      int localC = packed.c;
-      ret->l = packedHeadIndex;
-      mod = modPowerOf2(ret->physical, localC);
-      if (ret->logical >= packed.logical || !presence[mod]) {
+      oldPacked.l = packedHeadIndex;
+      ret->logical = oldPacked.logical + 1;
+      ret->physical = next[oldPacked.physical];
+      if (oldPacked.logical >= tailIndex || !presence[ret->physical]) {
         traceEmpty();
+        waitNotEmpty();
         return false;
       }
+    } while (!__sync_bool_compare_and_swap(&packedHeadIndex, oldPacked.l, ret->l));
 
-      next.logical = ret->logical + 1;
-      next.physical = modPowerOf2(mod + 1, localC);
-
-    } while (!__sync_bool_compare_and_swap(&packedHeadIndex, ret->l, next.l));
-
-    ret->physical = mod;
     __sync_fetch_and_add(&reservedDequeueCounter, 1);
 
 #if QED_TRACE_LEVEL >= 2
     isSpinningEmpty = false;
 #endif
-    traceReserveDequeue(mod);
+    traceReserveDequeue(ret->physical);
 
     return true;
   }
@@ -384,6 +386,7 @@ public :
   void commitDequeue(int h) {
     assert(presence[h]);
     presence[h] = 0;
+    broadCastNotFull();
     __sync_fetch_and_add(&reservedDequeueCounter, -1);
     traceCommitDequeue(h);
   }
@@ -397,6 +400,7 @@ public :
   bool isEmpty() const {
     PackedIndex head;
     head.l = packedHeadIndex;
+    head.physical = next[head.physical];
     return isEmpty(head);
   }
 
@@ -409,6 +413,7 @@ public :
   }
 
 private :
+  volatile int * const next __attribute__((aligned (64)));
   volatile int * const presence __attribute__((aligned (64)));
   struct {
     union {
@@ -442,94 +447,96 @@ class SpQed : public BaseQed<T> {
 public :
   SpQed(int minC = 4, const int maxC = MAX_QLEN) :
     BaseQed<T>(minC, maxC),
+    next((volatile int * const)alignedCalloc<int>(N)),
     presence((volatile int * const)alignedCalloc<int>(N)),
-    headIndex(0), headIndexMod(0),
+    headIndex(-1),
     reservedDequeueCounter(0),
-    tailIndex(0), c(std::min(std::max(DEFAULT_CAPACITY, minC), maxC)),
-    tailIndexMod(0),
+    tailIndex(-1),
+    c(std::min(std::max(DEFAULT_CAPACITY, minC), maxC)),
     minOcc(SHRT_MAX), maxOcc(0) {
+    tailIndexMod = c - 1;
+    headIndexMod = maxC - 1;
   }
 
   QED_USING_BASE_QED_MEMBERS
 
   bool reserveEnqueue(PackedIndex *ret) {
-    if (isFull()) {
-      return false;
-    }
-    else {
-      ret->logical = tailIndex;
-      ret->physical = tailIndexMod;
-      traceReserveEnqueue(ret->physical);
-      return true;
-    }
-  }
-
-  /**
-   * @param t a dummy argument to make the interface consistent
-   */
-  void commitEnqueue(int t = 0) {
     int localTailIndex = tailIndex;
-    int occ1 = localTailIndex - headIndex + 1;
+    int occ1 = localTailIndex - headIndex;
 
     int mod = tailIndexMod + 1;
-    int localC = c;
-    if (mod >= localC) {
-      if (shouldExpand(occ1, localC, minOcc, maxOcc)) {
-        localC <<= 1;
-        traceResizing(localC);
+
+    if (presence[mod]) {
+      traceFull();
+      waitNotFull();
+      return false;
+    }
+
+    if (mod >= c) {
+      if (shouldExpand(occ1, c, minOcc, maxOcc)) {
+        c <<= 1;
+        traceResizing(c);
+      }
+      else if (presence[0]) {
+        traceFull();
+        waitNotFull();
+        return false;
       }
       else {
         maxOcc = 0;
       }
       minOcc = SHRT_MAX;
     }
-    else if (shouldShrink(mod, occ1, minOcc, maxOcc)) {
-      localC = mod;
+    else if (shouldShrink(mod, occ1, minOcc, maxOcc) && !presence[0]) {
+      c = mod;
       minOcc = SHRT_MAX;
       maxOcc = 0;
-      traceResizing(localC);
+      traceResizing(c);
     }
 
-    assert(!presence[tailIndexMod]);
-    presence[tailIndexMod] = 1;
-    traceCommitEnqueue(tailIndexMod);
-    IndexAndC localTailIndexAndC;
-    localTailIndexAndC.index = localTailIndex + 1;
-    localTailIndexAndC.c = localC;
-    tailIndexAndC = localTailIndexAndC.l;
-    tailIndexMod = mod&(localC - 1);
+    ret->logical = localTailIndex + 1;
+    ret->physical = mod&(c - 1);
+    next[tailIndexMod] = ret->physical;
+    tailIndexMod = ret->physical;
 
     int occ2 = occ1 + reservedDequeueCounter;
     minOcc = std::min(minOcc, occ1);
-    maxOcc = std::max(maxOcc, occ2); 
+    maxOcc = std::max(maxOcc, occ2);
+
+    traceReserveEnqueue(ret->physical);
+
+    return true;
+  }
+
+  /**
+   * @param t a dummy argument to make the interface consistent
+   */
+  void commitEnqueue(int t = 0) {
+    presence[tailIndexMod] = 1;
+    tailIndex++;
+    traceCommitDequeue(tailIndexMod);
+    broadCastNotEmpty();
   }
 
   bool reserveDequeue(PackedIndex *ret) {
-    PackedIndex next;
-    int mod;
+    PackedIndex oldPacked;
     do {
-      IndexAndC localTailIndexAndC;
-      localTailIndexAndC.l = tailIndexAndC;
-      int localC = localTailIndexAndC.c;
-      ret->l = packedHeadIndex;
-      mod = ret->physical&(localC - 1);
-      if (ret->logical >= localTailIndexAndC.index || !presence[mod]) {
+      oldPacked.l = packedHeadIndex;
+      ret->logical = oldPacked.logical + 1;
+      ret->physical = next[oldPacked.physical];
+      if (oldPacked.logical >= tailIndex || !presence[ret->physical]) {
         traceEmpty();
+        waitNotEmpty();
         return false;
       }
-      
-      next.logical = ret->logical + 1;
-      next.physical = (mod + 1)&(localC - 1);
+    } while (!__sync_bool_compare_and_swap(&packedHeadIndex, oldPacked.l, ret->l));
 
-    } while (!__sync_bool_compare_and_swap(&packedHeadIndex, ret->l, next.l));
-
-    ret->physical = mod;
     __sync_fetch_and_add(&reservedDequeueCounter, 1);
 
 #if QED_TRACE_LEVEL >= 2
     isSpinningEmpty = false;
 #endif
-    traceReserveDequeue(mod);
+    traceReserveDequeue(ret->physical);
 
     return true;
   }
@@ -538,14 +545,15 @@ public :
    * @param h the reserved physical index
    */
   void commitDequeue(int h) {
-    __sync_fetch_and_add(&reservedDequeueCounter, -1);
     assert(presence[h]);
     presence[h] = 0;
+    signalNotFull();
+    __sync_fetch_and_add(&reservedDequeueCounter, -1);
     traceCommitDequeue(h);
   }
 
   bool isEmpty(const PackedIndex& h) {
-    bool ret = !presence[h.physical&(c - 1)] || h.logical == tailIndex;
+    bool ret = h.logical == tailIndex || !presence[next[headIndexMod]];
     traceEmpty(ret);
     return ret;
   }
@@ -553,11 +561,12 @@ public :
   bool isEmpty() {
     PackedIndex head;
     head.l = packedHeadIndex;
+    head.physical = next[head.physical];
     return isEmpty(head);
   }
 
   bool isFull() {
-    bool ret = presence[tailIndexMod];
+    bool ret = presence[(tailIndexMod + 1)&(c - 1)];
     traceFull(ret);
     return ret;
   }
@@ -567,6 +576,7 @@ public :
   }
 
 private :
+  volatile int * const next __attribute__((aligned (64)));
   volatile int * const presence __attribute__((aligned (64)));
   struct {
     union {
@@ -578,14 +588,8 @@ private :
     };
     volatile int reservedDequeueCounter;
   } __attribute__((aligned (64)));
-  union {
-    struct {
-      volatile int tailIndex;
-      volatile int c;
-    };
-    volatile long tailIndexAndC;
-  } __attribute__((aligned (64)));
-  int tailIndexMod;
+  volatile int tailIndex __attribute__((aligned (64)));
+  int tailIndexMod, c;
   int minOcc, maxOcc;
 };
 
@@ -597,10 +601,13 @@ class ScQed : public BaseQed<T> {
 public :
   ScQed(int minC = 4, const int maxC = MAX_QLEN) :
     BaseQed<T>(minC, maxC),
+    next((volatile int * const)alignedCalloc<int>(N)),
     presence((volatile int * const)alignedCalloc<int>(N)),
-    headIndex(0), tailIndex(0),
-    tailIndexMod(0), c(log2(std::min(std::max(DEFAULT_CAPACITY, minC), maxC))),
-    minOcc(SHRT_MAX), maxOcc(0), reservedEnqueueCounter(0), headIndexMod(0) {
+    headIndex(-1), tailIndex(-1),
+    c(log2(std::min(std::max(DEFAULT_CAPACITY, minC), maxC))),
+    minOcc(SHRT_MAX), maxOcc(0), reservedEnqueueCounter(0) {
+    tailIndexMod = (1 << c) - 1;
+    headIndexMod = maxC - 1;
   }
 
   QED_USING_BASE_QED_MEMBERS
@@ -609,14 +616,12 @@ public :
     PackedIndexAndC oldPacked, newPacked; 
     int h, t, mod, occ2;
 
-    //bool shrink2;
     do {
-      //shrink2 = false;
       h = headIndex;
       oldPacked.l = packedTailIndexAndC;
 
       t = oldPacked.logical;
-      mod = oldPacked.physical;
+      mod = oldPacked.physical + 1;
       int localC = 1 << oldPacked.c;
 
       newPacked.l = oldPacked.l;
@@ -624,6 +629,7 @@ public :
       occ2 = t - h;
       if (occ2 >= localC || presence[mod]) {
         traceFull();
+        waitNotFull();
         return false;
       }
 
@@ -633,13 +639,9 @@ public :
         }
         else if (presence[0]) {
           traceFull();
+          waitNotFull();
           return false;
         }
-        //else if (shouldShrink2(occ2, localC, minOcc, maxOcc)) {
-          //newPacked.c = oldPacked.c - 1;
-          //mod = 0;
-          //shrink2 = true;
-        //}
         else {
           mod = 0;
         }
@@ -650,7 +652,7 @@ public :
       }
 
       newPacked.logical= t + 1;
-      newPacked.physical= mod + 1;
+      newPacked.physical= mod;
     } while (!__sync_bool_compare_and_swap(
       &packedTailIndexAndC, oldPacked.l, newPacked.l));
 
@@ -668,18 +670,14 @@ public :
       maxOcc = std::max<volatile int>(maxOcc, occ2);
     }
 
-    ret->logical = t;
+    ret->logical = t + 1;
     ret->physical = mod;
+    next[oldPacked.physical] = mod;
     __sync_fetch_and_add(&reservedEnqueueCounter, 1);
 
 #if QED_TRACE_LEVEL > 0
     if (newPacked.c != oldPacked.c) {
-      //if (shrink2) {
-        //traceResizing2(1 << newPacked.c);
-      //}
-      //else {
-        traceResizing(1 << newPacked.c);
-      //}
+      traceResizing(1 << newPacked.c);
     }
 #endif
 #if QED_TRACE_LEVEL >= 2
@@ -697,28 +695,26 @@ public :
     assert(t < (1 << c));
     assert(!presence[t]);
     presence[t] = 1;
+    signalNotEmpty();
     __sync_fetch_and_add(&reservedEnqueueCounter, -1);
     traceCommitEnqueue(t);
   }
 
   bool reserveDequeue(PackedIndex *ret) {
-    PackedIndexAndC packed;
-    packed.l = packedTailIndexAndC;
-    int localC = 1 << packed.c;
-    int mod = headIndexMod&(localC - 1);
-    if (!presence[mod]) {
+    ret->physical = next[headIndexMod];
+    if (!presence[ret->physical]) {
       traceEmpty();
+      waitNotEmpty();
       return false;
     }
 
-    ret->logical = headIndex;
-    ret->physical = mod;
-    headIndexMod = mod;
+    ret->logical = headIndex + 1;
+    headIndexMod = ret->physical;
 
 #if QED_TRACE_LEVEL >= 2
     isSpinningEmpty = false;
 #endif
-    traceReserveDequeue(mod);
+    traceReserveDequeue(ret->physical);
     return true;
   }
 
@@ -730,13 +726,12 @@ public :
     assert(presence[headIndexMod]);
     presence[headIndexMod] = 0;
     traceCommitDequeue(headIndexMod);
-    headIndexMod = modPowerOf2(headIndexMod + 1, c);
     headIndex++;
+    broadCastNotFull();
   }
 
   bool isEmpty() {
-    headIndexMod &= (1 << c) - 1;
-    bool ret = !presence[headIndexMod];
+    bool ret = !presence[next[headIndexMod]];
     traceEmpty(ret);
     return ret;
   }
@@ -750,6 +745,7 @@ public :
   }
 
 private :
+  volatile int * const next __attribute__((aligned (64)));
   volatile int * const presence __attribute__((aligned (64)));
   volatile int headIndex __attribute__((aligned (64)));
   int headIndexMod;
@@ -778,14 +774,21 @@ public :
   OrderedScQed(int minC = 4, const int maxC = MAX_QLEN) :
     BaseQed<T>(minC, maxC),
     presence((volatile int * const)alignedCalloc<int>(BaseQ<T>::N)),
-    headIndex(0), tailIndex(0),
+    headIndex(0), headIndexMod(0), tailIndex(0),
     tailIndexBase(0), c(std::min(std::max(DEFAULT_CAPACITY, minC), maxC)),
-    minOcc(SHRT_MAX), maxOcc(0), reservedEnqueueCounter(0),
-    headIndexMod(0) {
+    minOcc(SHRT_MAX), maxOcc(0), reservedEnqueueCounter(0) {
 #ifdef QED_USE_SPIN_LOCK
     pthread_spin_init(&lock_, PTHREAD_PROCESS_PRIVATE);
 #else
     pthread_mutex_init(&lock_, NULL);
+#endif
+  }
+
+  OrderedScQed() {
+#ifdef QED_USE_SPIN_LOCK
+    pthread_spin_destroy(&lock_);
+#else
+    pthread_mutex_destroy(&lock_);
 #endif
   }
 
@@ -802,6 +805,7 @@ public :
     if (seqId - h >= localC ||
       presence[(seqId - tailIndexBase)&(localC - 1)]) {
       traceFull();
+      waitNotFull();
       return false;
     }
 
@@ -813,6 +817,7 @@ public :
     if (seqId - h >= localC || presence[(seqId - base)&(localC - 1)]) {
       unlock();
       traceFull();
+      waitNotFull();
       return false;
     }
 
@@ -828,6 +833,7 @@ public :
       else if (presence[0]) {
         unlock();
         traceFull();
+        waitNotFull();
         return false;
       }
       else {
@@ -868,12 +874,14 @@ public :
   void commitEnqueue(int t) {
     assert(!presence[t&(c - 1)]);
     presence[t&(c - 1)] = 1;
+    signalNotEmpty();
     __sync_fetch_and_add(&reservedEnqueueCounter, -1);
     traceCommitEnqueue(t&(c - 1));
   }
 
   bool reserveDequeue(PackedIndex *ret) {
     if (isEmpty()) {
+      waitNotEmpty();
       return false;
     }
     else {
@@ -894,6 +902,7 @@ public :
     traceCommitDequeue(headIndexMod);
     headIndexMod = (headIndexMod + 1)&(c - 1);
     headIndex++;
+    broadCastNotFull();
   }
 
   bool isEmpty() {
@@ -957,11 +966,13 @@ template<class T>
 class SpscQed : public BaseQed<T> {
 public :
   SpscQed(int minC = 4, int maxC = MAX_QLEN) :
-    BaseQed<T>(minC, maxC), headIndex(0), tailIndex(0),
+    BaseQed<T>(minC, maxC),
+    next((volatile int * const)alignedCalloc<int>(N)),
+    headIndex(-1), tailIndex(-1),
     c(std::min(std::max(DEFAULT_CAPACITY, minC), maxC)),
-    tailIndexMod(0), headIndexMod(0),
-    localC(std::min(std::max(DEFAULT_CAPACITY, minC), maxC)),
     minOcc(SHRT_MAX), maxOcc(0) {
+    tailIndexMod = c - 1;
+    headIndexMod = maxC - 1;
   }
 
   QED_USING_BASE_QED_MEMBERS
@@ -973,27 +984,17 @@ public :
    */
   bool reserveEnqueue(PackedIndex *ret) {
     if (isFull()) {
+      waitNotFull();
       return false;
     }
-    else {
-      ret->logical = tailIndex;
-      ret->physical = tailIndexMod;
-      traceReserveEnqueue(ret->physical);
-      return true;
-    }
-  }
 
-  /**
-   * @param t a dummy argument to make the interface consistent
-   */
-  void commitEnqueue(int t = 0) {
-    int occ = tailIndex - headIndex + 1;
+    int occ = tailIndex - headIndex;
     int mod = tailIndexMod + 1;
 
-    if (mod >= localC) {
-      if (shouldExpand(occ, localC, minOcc, maxOcc)) {
-        localC <<= 1;
-        traceResizing(localC);
+    if (mod >= c) {
+      if (shouldExpand(occ, c, minOcc, maxOcc)) {
+        c <<= 1;
+        traceResizing(c);
       }
       else {
         maxOcc = 0;
@@ -1001,21 +1002,32 @@ public :
       minOcc = SHRT_MAX;
     }
     else if (shouldShrink(mod, occ, minOcc, maxOcc)) {
-      localC = tailIndexMod + 1;
+      c = mod;
       minOcc = SHRT_MAX;
       maxOcc = 0;
-      traceResizing(localC);
-    }
+      traceResizing(c);
+    } 
 
-    traceCommitEnqueue(tailIndexMod);
-    IndexAndC localTailIndexAndC;
-    localTailIndexAndC.index = tailIndex + 1;
-    localTailIndexAndC.c = localC;
-    tailIndexAndC = localTailIndexAndC.l;
-    tailIndexMod = mod&(localC - 1);
+    ret->logical = tailIndex + 1;
+    ret->physical = mod&(c - 1);
+    next[tailIndexMod] = ret->physical;
+    tailIndexMod = ret->physical;
 
     minOcc = std::min(minOcc, occ);
     maxOcc = std::max(maxOcc, occ);
+
+    traceReserveEnqueue(ret->physical);
+
+    return true;
+  }
+
+  /**
+   * @param t a dummy argument to make the interface consistent
+   */
+  void commitEnqueue(int t = 0) {
+    tailIndex++;
+    traceCommitEnqueue(tailIndexMod);
+    signalNotEmpty();
   }
 
   /**
@@ -1024,16 +1036,15 @@ public :
    * @return true if reservation is successful.
    */
   bool reserveDequeue(PackedIndex *ret) {
-    IndexAndC localTailIndexAndC;
-    localTailIndexAndC.l = tailIndexAndC;
-    ret->logical = headIndex;
-    if (ret->logical >= localTailIndexAndC.index) {
+    ret->logical = headIndex + 1;
+    if (ret->logical > tailIndex) {
       traceEmpty();
+      waitNotEmpty();
       return false;
     }
 
-    headIndexMod &= localTailIndexAndC.c - 1;
-    ret->physical = headIndexMod;
+    ret->physical = next[headIndexMod];
+    headIndexMod = ret->physical;
 #if QED_TRACE_LEVEL >= 2
     isSpinningEmpty = false;
 #endif
@@ -1047,8 +1058,8 @@ public :
   void commitDequeue(int h = 0) {
     assert(headIndexMod < c);
     traceCommitDequeue(headIndexMod);
-    headIndexMod = (headIndexMod + 1)&(c - 1);
     headIndex++;
+    signalNotFull();
   }
 
   bool isEmpty() {
@@ -1058,7 +1069,7 @@ public :
   }
 
   bool isFull() {
-    bool ret = tailIndex - headIndex >= localC;
+    bool ret = tailIndex - headIndex >= c;
     traceFull(ret);
     return ret;
   }
@@ -1068,16 +1079,11 @@ public :
   }
 
 private :
+  volatile int * const next __attribute__((aligned (64)));
   volatile int headIndex __attribute__((aligned (64)));
   int headIndexMod;
-  union {
-    struct {
-      volatile int tailIndex;
-      volatile int c;
-    };
-    volatile long tailIndexAndC;
-  } __attribute__((aligned (64)));
-  int tailIndexMod, localC;
+  volatile int tailIndex __attribute__((aligned (64)));
+  int tailIndexMod, c;
   int minOcc, maxOcc;
 };
 
