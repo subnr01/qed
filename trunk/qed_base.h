@@ -46,7 +46,7 @@ T * const alignedCalloc(size_t n) {
  * The size of buffer that holds traces.
  * When we have more traces than this number, old traces will be overwritten.
  */
-static const int TRACE_LENGTH = 65536*16;
+static const int TRACE_LENGTH = 65536*64;
 
 /**
  * Read TSC (Time Stamp Counter) hardware performance counter
@@ -381,8 +381,8 @@ public :
 
     // 4. Compute optimal capacities.
     int lastOpt = -1;
-    int *hist = new int[65536];
-    for (int i = 0; i < 65536; i++) {
+    int *hist = new int[1048576];
+    for (int i = 0; i < 1048576; i++) {
       hist[i] = 0;
     }
     for (int i = 0; i < cnt; i++) {
@@ -412,7 +412,7 @@ public :
 
     int sum = hist[0];
     int i;
-    for (i = 1; i < 65536; i *= 2) {
+    for (i = 1; i < 1048576; i *= 2) {
       for (int j = i; j < i*2; j++) {
         sum += hist[j];
       }
@@ -423,6 +423,11 @@ public :
 
     delete[] hist;
     return i*2;
+  }
+
+  void printTraceIndex() {
+    std::cout << traceIndex << std::endl;
+    std::cout << traces[traceIndex].id << " " << traces[traceIndex].value << std::endl;
   }
 #else
   void traceReserveEnqueue(int tail) { }
